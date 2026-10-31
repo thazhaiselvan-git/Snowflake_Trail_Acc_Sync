@@ -1,0 +1,16 @@
+name: 'dbt_lab'
+version: '1.0.0'
+profile: 'dbt_lab'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+
+models:
+  dbt_lab:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

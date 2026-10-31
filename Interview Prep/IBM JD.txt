@@ -1,0 +1,34 @@
+Your role and responsibilities
+As a Data Engineer specializing in Data Platforms-SnowFlake, you play a critical role in building and enhancing Snowflake platforms for client's Data and AI usecases. This position focuses on implementing Data and AI solutions on Snowflake platforms.
+
+Your primary responsibilities will include:
+
+• Design and Implement Solutions: Implement Data and AI usecases on Snowflake platforms, ensuring seamless integration and optimal performance.
+
+• Enhance Platform Capabilities: Build and enhance Snowflake platform capabilities to meet client needs and advance Data and AI applications.
+
+• Leverage Key Skills: Apply expertise in Snowflake, Data Engineering, and Cloud technologies to deliver high-quality solutions.
+
+Required education
+Bachelor's Degree
+Preferred education
+Master's Degree
+Required technical and professional expertise
+• Snowflake Platform Expertise: Experience with designing and implementing data and AI usecases on Snowflake platforms, ensuring seamless integration and optimal performance.
+
+• Data Engineering Knowledge: Experience with data engineering principles and practices, including data modeling, data warehousing, and data governance.
+
+• Cloud Technology Proficiency: Experience with cloud technologies, including migration, deployment, and management of cloud-based data platforms.
+
+• Solution Implementation Skills: Experience with implementing data and AI solutions on Snowflake platforms, leveraging expertise in Snowflake, Data Engineering, and Cloud technologies.
+
+• Platform Enhancement Capabilities: Experience with building and enhancing Snowflake platform capabilities to meet client needs and advance Data and AI applications.
+
+Preferred technical and professional experience
+• Advanced Snowflake Platform Knowledge: Experience with advanced Snowflake features, including data sharing, data pipelines, and data security. Ability to design and implement complex data and AI usecases on Snowflake platforms.
+
+• Cloud Architecture Expertise: Experience with designing and implementing scalable and secure cloud architectures for data and AI applications. Knowledge of cloud migration, deployment, and management best practices.
+
+• Data Engineering Best Practices: Experience with implementing data engineering best practices, including data modeling, data warehousing, and data governance. Ability to optimize data and AI solutions for performance and scalability.
+
+Years of Experience:10 - 12

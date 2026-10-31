@@ -1,0 +1,12 @@
+dbt_lab:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: 'not needed'
+      user: 'not needed'
+      role: ACCOUNTADMIN
+      warehouse: COMPUTE_WH
+      database: DBT_LAB
+      schema: DEV
+      threads: 8

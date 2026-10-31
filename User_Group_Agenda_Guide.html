@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snowflake User Group - Event Preparation Guide</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(135deg, #0f0c29, #1a1a4e, #24243e);
+    min-height: 100vh;
+    color: #e0e0e0;
+    padding: 40px 20px;
+  }
+
+  .container { max-width: 1000px; margin: 0 auto; }
+
+  .header {
+    text-align: center;
+    margin-bottom: 50px;
+    position: relative;
+  }
+
+  .header::after {
+    content: '';
+    display: block;
+    width: 120px;
+    height: 4px;
+    background: linear-gradient(90deg, #29b5e8, #7c3aed, #f472b6);
+    margin: 20px auto 0;
+    border-radius: 2px;
+  }
+
+  .badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #29b5e8, #7c3aed);
+    color: #fff;
+    padding: 6px 18px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+
+  .header h1 {
+    font-size: 2.4rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #29b5e8, #a78bfa, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    line-height: 1.3;
+  }
+
+  .header p {
+    color: #94a3b8;
+    font-size: 1rem;
+    margin-top: 10px;
+  }
+
+  .timeline { position: relative; padding-left: 40px; }
+
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 18px;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: linear-gradient(to bottom, #29b5e8, #7c3aed, #f472b6, #f59e0b, #10b981);
+    border-radius: 2px;
+  }
+
+  .session {
+    position: relative;
+    margin-bottom: 36px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 28px 28px 24px;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+
+  .session:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+    border-color: rgba(255,255,255,0.15);
+  }
+
+  .session::before {
+    content: '';
+    position: absolute;
+    left: -31px;
+    top: 32px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 3px solid;
+    background: #1a1a4e;
+  }
+
+  .session:nth-child(1)::before { border-color: #29b5e8; box-shadow: 0 0 12px rgba(41,181,232,0.4); }
+  .session:nth-child(2)::before { border-color: #7c3aed; box-shadow: 0 0 12px rgba(124,58,237,0.4); }
+  .session:nth-child(3)::before { border-color: #f472b6; box-shadow: 0 0 12px rgba(244,114,182,0.4); }
+  .session:nth-child(4)::before { border-color: #f59e0b; box-shadow: 0 0 12px rgba(245,158,11,0.4); }
+  .session:nth-child(5)::before { border-color: #10b981; box-shadow: 0 0 12px rgba(16,185,129,0.4); }
+  .session:nth-child(6)::before { border-color: #64748b; box-shadow: 0 0 12px rgba(100,116,139,0.3); }
+
+  .session:nth-child(1) { border-left: 3px solid #29b5e8; }
+  .session:nth-child(2) { border-left: 3px solid #7c3aed; }
+  .session:nth-child(3) { border-left: 3px solid #f472b6; }
+  .session:nth-child(4) { border-left: 3px solid #f59e0b; }
+  .session:nth-child(5) { border-left: 3px solid #10b981; }
+  .session:nth-child(6) { border-left: 3px solid #64748b; }
+
+  .time-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 8px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-bottom: 12px;
+    letter-spacing: 0.5px;
+  }
+
+  .session:nth-child(1) .time-badge { background: rgba(41,181,232,0.15); color: #29b5e8; }
+  .session:nth-child(2) .time-badge { background: rgba(124,58,237,0.15); color: #a78bfa; }
+  .session:nth-child(3) .time-badge { background: rgba(244,114,182,0.15); color: #f472b6; }
+  .session:nth-child(4) .time-badge { background: rgba(245,158,11,0.15); color: #f59e0b; }
+  .session:nth-child(5) .time-badge { background: rgba(16,185,129,0.15); color: #10b981; }
+  .session:nth-child(6) .time-badge { background: rgba(100,116,139,0.15); color: #94a3b8; }
+
+  .session h2 {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: #f1f5f9;
+    margin-bottom: 6px;
+    line-height: 1.4;
+  }
+
+  .speaker {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .speaker .icon { font-size: 1rem; }
+
+  .summary {
+    background: rgba(255,255,255,0.03);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+    border: 1px solid rgba(255,255,255,0.05);
+  }
+
+  .summary h3 {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #64748b;
+    margin-bottom: 8px;
+  }
+
+  .summary p {
+    font-size: 0.9rem;
+    line-height: 1.7;
+    color: #cbd5e1;
+  }
+
+  .prep {
+    background: rgba(255,255,255,0.03);
+    border-radius: 10px;
+    padding: 16px;
+    border: 1px solid rgba(255,255,255,0.05);
+  }
+
+  .prep h3 {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #64748b;
+    margin-bottom: 10px;
+  }
+
+  .prep ul { list-style: none; padding: 0; }
+
+  .prep li {
+    position: relative;
+    padding-left: 22px;
+    margin-bottom: 8px;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    color: #cbd5e1;
+  }
+
+  .prep li::before {
+    content: '▸';
+    position: absolute;
+    left: 0;
+    font-weight: 700;
+  }
+
+  .session:nth-child(1) .prep li::before { color: #29b5e8; }
+  .session:nth-child(2) .prep li::before { color: #a78bfa; }
+  .session:nth-child(3) .prep li::before { color: #f472b6; }
+  .session:nth-child(4) .prep li::before { color: #f59e0b; }
+  .session:nth-child(5) .prep li::before { color: #10b981; }
+
+  .break-card {
+    text-align: center;
+    padding: 20px;
+    background: rgba(255,255,255,0.02);
+    border: 1px dashed rgba(255,255,255,0.1);
+    border-radius: 12px;
+    margin-bottom: 36px;
+    position: relative;
+  }
+
+  .break-card .icon { font-size: 1.6rem; margin-bottom: 6px; }
+  .break-card p { color: #94a3b8; font-size: 0.9rem; }
+
+  .tip-box {
+    margin-top: 40px;
+    padding: 24px 28px;
+    background: linear-gradient(135deg, rgba(41,181,232,0.08), rgba(124,58,237,0.08));
+    border: 1px solid rgba(41,181,232,0.2);
+    border-radius: 14px;
+  }
+
+  .tip-box h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #29b5e8;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .tip-box p {
+    font-size: 0.9rem;
+    line-height: 1.7;
+    color: #94a3b8;
+  }
+
+  .footer {
+    text-align: center;
+    margin-top: 50px;
+    color: #475569;
+    font-size: 0.8rem;
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: rgba(255,255,255,0.06);
+    color: #94a3b8;
+    margin-right: 4px;
+    margin-bottom: 4px;
+  }
+
+  .tags { margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div class="badge">❄️ Snowflake User Group</div>
+    <h1>Event Preparation Guide</h1>
+    <p>Topic summaries &amp; what to know before you attend</p>
+  </div>
+
+  <div class="timeline">
+
+    <!-- Session 1 -->
+    <div class="session">
+      <div class="time-badge">🕤 9:30 AM</div>
+      <h2>From Pipelines to Data Products: AI Powered Snowflake Approach</h2>
+      <div class="speaker"><span class="icon">🎤</span> Poomari Manoharan &bull; Principal Consultant, Hexaware Technologies</div>
+      <div class="summary">
+        <h3>📋 Summary</h3>
+        <p>This session explores the paradigm shift from traditional ETL/ELT pipelines to a <strong>data products</strong> mindset — treating datasets as reusable, governed, and discoverable assets. Learn how Snowflake's AI capabilities (Cortex functions, Document AI) can automate and enhance this transformation, enabling self-serve analytics at scale.</p>
+      </div>
+      <div class="prep">
+        <h3>🎯 How to Prepare</h3>
+        <ul>
+          <li>Understand <strong>Data Mesh</strong> &amp; <strong>Data Products</strong> — discoverability, quality, SLAs, ownership</li>
+          <li>Explore <strong>Snowflake Cortex AI functions</strong> — AI_COMPLETE, AI_EXTRACT, AI_CLASSIFY, AI_SENTIMENT</li>
+          <li>Review how <strong>Dynamic Tables</strong> and <strong>Streams/Tasks</strong> build pipelines in Snowflake</li>
+          <li>Read about <strong>Snowflake Marketplace</strong> and data sharing concepts</li>
+        </ul>
+      </div>
+      <div class="tags">
+        <span class="tag">Data Mesh</span>
+        <span class="tag">Cortex AI</span>
+        <span class="tag">Dynamic Tables</span>
+        <span class="tag">Data Products</span>
+      </div>
+    </div>
+
+    <!-- Session 2 -->
+    <div class="session">
+      <div class="time-badge">🕙 10:00 AM</div>
+      <h2>The Rise of the AI Data Analyst: A Live Demo of Snowflake Cortex Agents</h2>
+      <div class="speaker"><span class="icon">🎤</span> Sindhu K &bull; Senior Technical Architect, Hexaware Technologies</div>
+      <div class="summary">
+        <h3>📋 Summary</h3>
+        <p>A hands-on live demo of <strong>Cortex Agents</strong> — Snowflake's natural-language-to-SQL AI agents that let business users ask questions in plain English and get answers from their data. Covers Semantic Views, Cortex Analyst, and the agentic AI framework that makes self-serve analytics truly accessible.</p>
+      </div>
+      <div class="prep">
+        <h3>🎯 How to Prepare</h3>
+        <ul>
+          <li>Read about <strong>Snowflake Cortex Agents</strong> &amp; <strong>Cortex Analyst</strong> — NL-to-SQL conversion</li>
+          <li>Understand <strong>Semantic Views</strong> — the metadata layer that tells agents what data means</li>
+          <li>Explore <strong>Cortex Search</strong> for unstructured data retrieval</li>
+          <li>Try the Cortex Analyst demo in Snowsight if you have access</li>
+        </ul>
+      </div>
+      <div class="tags">
+        <span class="tag">Cortex Agents</span>
+        <span class="tag">Semantic Views</span>
+        <span class="tag">NL-to-SQL</span>
+        <span class="tag">Live Demo</span>
+      </div>
+    </div>
+
+    <!-- Session 3 -->
+    <div class="session">
+      <div class="time-badge">🕥 10:30 AM</div>
+      <h2>Building a Real-Time Data Vault in Snowflake</h2>
+      <div class="speaker"><span class="icon">🎤</span> Sivaprakasam Jothi &bull; Senior Technical Architect, Hexaware Technologies</div>
+      <div class="summary">
+        <h3>📋 Summary</h3>
+        <p>Deep dive into implementing <strong>Data Vault 2.0</strong> modeling (Hubs, Links, Satellites) on Snowflake with real-time or near-real-time ingestion. Expect discussion on Streams, Tasks, Dynamic Tables, and possibly Snowpipe Streaming for low-latency loads into a historized, auditable data architecture.</p>
+      </div>
+      <div class="prep">
+        <h3>🎯 How to Prepare</h3>
+        <ul>
+          <li>Learn <strong>Data Vault 2.0</strong> — Hubs (business keys), Links (relationships), Satellites (descriptive data)</li>
+          <li>Understand <strong>Snowflake Streams &amp; Tasks</strong> for CDC (Change Data Capture)</li>
+          <li>Review <strong>Snowpipe</strong> &amp; <strong>Snowpipe Streaming</strong> for continuous ingestion</li>
+          <li>Familiarize with hash key generation and historization patterns</li>
+        </ul>
+      </div>
+      <div class="tags">
+        <span class="tag">Data Vault 2.0</span>
+        <span class="tag">Real-Time</span>
+        <span class="tag">CDC</span>
+        <span class="tag">Snowpipe Streaming</span>
+      </div>
+    </div>
+
+    <!-- Break -->
+    <div class="break-card">
+      <div class="time-badge" style="background: rgba(100,116,139,0.15); color: #94a3b8;">☕ 11:00 AM</div>
+      <div class="icon">☕🤝</div>
+      <p><strong>Tea Break &amp; Networking</strong> — Connect with speakers and fellow attendees!</p>
+    </div>
+
+    <!-- Session 4 -->
+    <div class="session">
+      <div class="time-badge">🕚 11:15 AM</div>
+      <h2>From Conversion to Confidence: Automating Migration Testing &amp; Validation with Snowflake AIM</h2>
+      <div class="speaker"><span class="icon">🎤</span> Ramya P &bull; Associate Principal - Data Engineering, LTM</div>
+      <div class="summary">
+        <h3>📋 Summary</h3>
+        <p>Focuses on <strong>Snowflake AIM (AI Migration)</strong> — the toolset that automates SQL dialect conversion (Oracle, Teradata, SQL Server → Snowflake) and validates that migrated code produces correct results. Covers automated testing frameworks, reconciliation strategies, and building confidence in large-scale migrations.</p>
+      </div>
+      <div class="prep">
+        <h3>🎯 How to Prepare</h3>
+        <ul>
+          <li>Understand common migration challenges — dialect differences, stored procedures, data types</li>
+          <li>Read about <strong>SnowConvert</strong> (code conversion engine) and EWI codes</li>
+          <li>Learn migration validation strategies — row counts, data comparison, reconciliation</li>
+          <li>Explore the <strong>Snowflake AIM</strong> portal and its assessment capabilities</li>
+        </ul>
+      </div>
+      <div class="tags">
+        <span class="tag">AIM</span>
+        <span class="tag">SnowConvert</span>
+        <span class="tag">Migration</span>
+        <span class="tag">Validation</span>
+      </div>
+    </div>
+
+    <!-- Session 5 -->
+    <div class="session">
+      <div class="time-badge">🕦 11:45 AM</div>
+      <h2>FinOps on Snowflake</h2>
+      <div class="speaker"><span class="icon">🎤</span> Y V Ravi Kumar &bull; Snowflake Data Superhero &amp; Global CTO, CloudDBOps</div>
+      <div class="summary">
+        <h3>📋 Summary</h3>
+        <p>Covers cost governance and optimization on Snowflake — warehouse sizing, resource monitors, budgets, query profiling, identifying wasteful patterns, and building a <strong>FinOps</strong> culture around Snowflake consumption. Learn how to get maximum value from every credit spent.</p>
+      </div>
+      <div class="prep">
+        <h3>🎯 How to Prepare</h3>
+        <ul>
+          <li>Understand <strong>Snowflake's credit-based pricing</strong> — compute, storage, serverless features</li>
+          <li>Review <strong>Resource Monitors</strong>, <strong>Budgets</strong>, and ACCOUNT_USAGE views</li>
+          <li>Learn warehouse optimization — auto-suspend, auto-resume, multi-cluster, right-sizing</li>
+          <li>Familiarize with the <strong>FinOps framework</strong> — accountability, visibility, optimization</li>
+        </ul>
+      </div>
+      <div class="tags">
+        <span class="tag">FinOps</span>
+        <span class="tag">Cost Optimization</span>
+        <span class="tag">Resource Monitors</span>
+        <span class="tag">Budgets</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="tip-box">
+    <h3>💡 Pro Tip</h3>
+    <p>If you have a Snowflake trial or dev account, explore <strong>Snowsight</strong> before the event. Many of these topics — Cortex Agents, Dynamic Tables, cost views — are accessible directly in the UI. Hands-on familiarity will help you follow the demos and ask better questions!</p>
+  </div>
+
+  <div class="footer">
+    <p>Generated for Snowflake User Group Event Preparation</p>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: raw
+    database: DBT_LAB
+    schema: RAW
+    loaded_at_field: _loaded_at
+    freshness:
+      warn_after: {count: 12, period: hour}
+      error_after: {count: 30, period: day}
+    tables:
+      - name: orders
+      - name: customers
+        freshness: null   # customers has no _loaded_at column

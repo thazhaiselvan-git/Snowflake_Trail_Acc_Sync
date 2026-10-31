@@ -1,0 +1,184 @@
+Here are the dbt building blocks in the order you’d explain them in an interview. Each has syntax, a use case, and the line to say.
+
+1. Project layout and config
+models/
+  staging/     stg_orders.sql, _sources.yml
+  intermediate/
+  marts/       fct_orders.sql, dim_customers.sql, _schema.yml
+snapshots/  seeds/  macros/  tests/
+dbt_project.yml
+yaml
+# dbt_project.yml
+models:
+  my_project:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+      +snowflake_warehouse: transform_wh   # Snowflake-specific: per-layer warehouse
+2. Sources and staging
+yaml
+# models/staging/_sources.yml
+version: 2
+sources:
+  - name: raw_sales
+    database: raw
+    schema: sales
+    loaded_at_field: _loaded_at
+    freshness:
+      warn_after: {count: 12, period: hour}
+      error_after: {count: 24, period: hour}
+    tables:
+      - name: orders
+      - name: customers
+sql
+-- models/staging/stg_orders.sql
+select
+    order_id,
+    customer_id,
+    order_ts::timestamp_ntz     as order_ts,
+    upper(status)               as status,
+    amount::number(12,2)        as amount,
+    _loaded_at
+from {{ source('raw_sales', 'orders') }}
+
+Use case: staging is a 1:1 clean layer (rename, cast, standardise). No joins or business logic. Check it with dbt source freshness.
+
+3. Mart model with ref()
+sql
+-- models/marts/fct_orders.sql
+select
+    o.order_id,
+    o.order_ts,
+    o.amount,
+    c.customer_id,
+    c.region
+from {{ ref('stg_orders') }} o
+join {{ ref('stg_customers') }} c using (customer_id)
+
+Say: “ref() builds the DAG, so dbt works out run order and lineage itself, and it resolves the right schema per environment.”
+
+4. Incremental models (most likely deep-dive)
+sql
+{{ config(
+    materialized='incremental',
+    unique_key='order_id',
+    incremental_strategy='merge',
+    on_schema_change='sync_all_columns'
+) }}
+
+select order_id, customer_id, status, amount, updated_at
+from {{ ref('stg_orders') }}
+
+{% if is_incremental() %}
+  where updated_at > (
+      select dateadd('day', -3, max(updated_at)) from {{ this }}
+  )
+{% endif %}
+Piece	Why
+unique_key	Rows with the same key get updated, not duplicated
+is_incremental()	True only on non-first runs when the table exists and no --full-refresh
+{{ this }}	The current model’s existing table
+3-day lookback	Catches late-arriving or updated records
+merge	Snowflake default; use delete+insert for large partition-style loads, append for insert-only event logs
+
+Use case: a 2-billion-row orders table. A full rebuild takes hours; incremental takes minutes and cuts credits.
+Gotcha: hard deletes in the source aren’t captured, so handle them with a soft-delete flag or periodic full refresh.
+
+5. Tests
+yaml
+# models/marts/_schema.yml
+version: 2
+models:
+  - name: fct_orders
+    description: "One row per order"
+    columns:
+      - name: order_id
+        tests: [unique, not_null]        # newer dbt versions use `data_tests:`
+      - name: status
+        tests:
+          - accepted_values:
+              values: ['PLACED', 'SHIPPED', 'RETURNED']
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('dim_customers')
+              field: customer_id
+
+Singular test (a SQL file in tests/; any returned rows mean failure):
+
+sql
+-- tests/assert_no_negative_amount.sql
+select order_id from {{ ref('fct_orders') }} where amount < 0
+
+Use case: dbt build runs models and tests together, so a failed test blocks the downstream models.
+
+6. Snapshots (SCD Type 2)
+sql
+{% snapshot customers_snapshot %}
+{{ config(
+    target_schema='snapshots',
+    unique_key='customer_id',
+    strategy='timestamp',
+    updated_at='updated_at'
+) }}
+select * from {{ source('raw_sales', 'customers') }}
+{% endsnapshot %}
+
+dbt adds dbt_valid_from and dbt_valid_to; the current row has dbt_valid_to null. Use case: tracking customer address or tier history. If there’s no reliable updated_at, use strategy='check' with check_cols.
+
+7. Macros and Jinja
+sql
+-- macros/cents_to_dollars.sql
+{% macro cents_to_dollars(col, scale=2) %}
+    round({{ col }} / 100, {{ scale }})
+{% endmacro %}
+
+-- usage
+select {{ cents_to_dollars('amount_cents') }} as amount from {{ ref('stg_payments') }}
+
+Loop to pivot:
+
+sql
+{% set statuses = ['placed', 'shipped', 'returned'] %}
+select customer_id,
+{% for s in statuses %}
+    sum(case when status = '{{ s }}' then 1 else 0 end) as {{ s }}_orders{{ "," if not loop.last }}
+{% endfor %}
+from {{ ref('stg_orders') }}
+group by 1
+
+Use case: removes copy-paste SQL. Packages like dbt_utils cover common patterns, for example {{ dbt_utils.generate_surrogate_key(['order_id','line_no']) }}.
+
+8. Snowflake-specific configs
+sql
+{{ config(
+    materialized='table',
+    transient=true,                 -- no Fail-safe storage, cheaper for staging/temp
+    cluster_by=['order_date'],
+    copy_grants=true,               -- keep grants when the table is rebuilt
+    snowflake_warehouse='heavy_wh',
+    post_hook="grant select on {{ this }} to role analyst_role"
+) }}
+
+This is where your Snowflake certifications help. Tie transient, cluster_by and per-model warehouses back to cost and performance.
+
+9. Commands to know
+Command	Use
+dbt build	Run models, tests, snapshots and seeds in DAG order
+dbt run -s fct_orders+	Model and everything downstream
+dbt run -s +fct_orders	Model and everything upstream
+dbt test -s stg_orders	Tests for one model
+dbt run --full-refresh	Rebuild incremental models
+dbt source freshness	Check source recency
+dbt docs generate && dbt docs serve	Docs and lineage graph
+dbt build -s state:modified+ --defer --state ./prod-artifacts	Slim CI: build only what changed
+10. Scenario answers
+Scenario	Answer
+Late-arriving data	Incremental with a lookback window and merge on unique_key
+Track history of a dimension	Snapshot (SCD2)
+Test failed in prod at 3 AM	dbt build stops downstream models; alert via the orchestrator; fix or quarantine bad rows; re-run with -s failed_model+
+Slow dbt model	Check Query Profile, convert to incremental, right-size warehouse, clustering, avoid wide select-star chains
+Dev vs prod	Separate targets, schemas (or databases), dev run on a data subset or clone
+dbt vs Streams/Tasks	Streams/Tasks for low-latency native pipelines; dbt for modular, tested, documented batch transformations; they combine well
+Big bang vs modular SQL	Replace a 1000-line stored procedure with layered models, each testable and reusable

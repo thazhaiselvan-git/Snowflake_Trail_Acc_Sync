@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: dim_customers
+    description: "One row per customer with order totals"
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+
+  - name: fct_orders
+    description: "One row per order"
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: status
+        data_tests:
+          - accepted_values:
+              values: ['PLACED', 'SHIPPED', 'RETURNED']
+      - name: customer_id
+        data_tests:
+          - relationships:
+              to: ref('dim_customers')
+              field: customer_id
