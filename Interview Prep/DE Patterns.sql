@@ -135,6 +135,8 @@ SELECT * FROM emp_dup ORDER BY emp_id;
 -- 3. GAPS AND ISLANDS: consecutive login streaks
 -- Trick: date - row_number is constant within a streak
 -- =====================================================
+SELECT MIN(login_date) AS streak_start, MAX(login_date) AS streak_end, COUNT(*) AS streak_days FROM logins GROUP BY user_id;
+
 WITH g AS (
   SELECT user_id, login_date,
     DATEADD(day, -ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY login_date), login_date) AS grp
