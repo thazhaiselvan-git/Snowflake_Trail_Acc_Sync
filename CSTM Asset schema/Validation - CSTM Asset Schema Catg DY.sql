@@ -6,7 +6,7 @@
      - standard category from NPF_ASSET + NPF_ASSET_CATG + package defaults
      - country from NPF_ASSET.cntry_risk_dcde + NPF_DECODE('CNTRY')
      - rules evaluated PER INSTRUMENT (DT evaluates per desc combo)
-   Instrument universe = DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN (same as the DT).
+   Instrument universe = DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN (same as the DT).
 
    Sections
      0  Parameters
@@ -43,8 +43,8 @@ SET V_SCHEMA_ID = NULL;          -- e.g. SET V_SCHEMA_ID = 101;
 CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED AS
 WITH
 inst AS (                                     -- same instrument universe as the DT
-    SELECT DISTINCT asd_instr_id AS instr_id
-    FROM DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN
+    SELECT DISTINCT instr_id
+    FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN
 ),
 ast AS (                                      -- NPF_ASSET attributes used by the proc
     SELECT a.instr_id, a.iss_type, a.cntry_risk_dcde
@@ -204,7 +204,7 @@ SELECT
   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED)                  AS expected_rows,
   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
     WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID))
-  * (SELECT COUNT(DISTINCT asd_instr_id) FROM DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN) AS grid_rows;
+  * (SELECT COUNT(DISTINCT instr_id) FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN) AS grid_rows;
 
 -- 2.2 Duplicate keys in DT (expect 0)
 SELECT schema_id, instr_id, cust_sk, COUNT(*) AS cnt

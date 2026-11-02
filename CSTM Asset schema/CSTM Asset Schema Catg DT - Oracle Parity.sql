@@ -7,8 +7,9 @@
    Grain : one row per NPF_CUST_CSTM_SCHEMA (CUST_SK, SCHEMA_ID) x asset instrument,
            RPTG_TYPE = 'WLT'    (= one npf_asst_typ_mgr call)
    Graph :
-     DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN (existing: NPF_ASSET + WLT category + decode)
-        │  read ONCE
+     DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN  (existing asset DT: NPF_ASSET filtered to
+        │  read ONCE                        held / traded instruments)
+        │  + NPF_ASSET_CATG (WLT)  + NPF_DECODE (CNTRY)
         ▼
      DT1 WPA_CAS_ASSET_STD_DYN    (6-arg proc + country)      1 row / instrument
         ├──────────────────────────────┐
@@ -23,7 +24,7 @@
 
    Oracle parity rules applied:
      P1  Defaults from package spec: '30' / '20' / 'Other Assets' / 'Miscellaneous'
-         (applied in the existing asset DT).
+         (applied in DT1 only when no NPF_ASSET_CATG row exists, as Oracle FETCH).
      P2  Oracle '' = NULL            -> NULLIF(col,'') on every text input.
      P3  Oracle CONCAT(NULL,'x')='x' -> NVL(col,'') || 'x'.
      P4  NULL comparisons never match (EQUAL and NOTEQUAL) - native in Snowflake too.
@@ -36,8 +37,10 @@
      P10 p_cust_sk is not used by the proc -> same result for every CUST_SK of a schema.
      P11 Rule result codes and country outputs are not used (as in Oracle).
 
-   Environment : DEV. NPF_* from DEV_WPA_ASSET_DB.CORE, asset DT from
-                 DEV_ANALYTICS_DB.WCA, warehouse DEV_ADHOC_ANALYSIS.
+   Environment : DEV. NPF_* from DEV_WPA_ASSET_DB.CORE, asset DT
+                 DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN (DEV copy of
+                 PROD_WPA_ASSET_DB.CORE.WPA_ASSET_DYN), NPF_DECODE from
+                 DEV_WPA_COMMON_UTIL_DB.CORE, warehouse DEV_ADHOC_ANALYSIS.
                  For UAT: replace DEV_ -> UAT_ and the warehouse name.
    NOT compiled here - DEV databases not visible from this session.
    ============================================================================= */
@@ -47,7 +50,9 @@
    0. Pre-reqs
    ----------------------------------------------------------------------------- */
 -- Change tracking on base tables read directly by the DTs
--- (DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN is a DT - no change tracking needed)
+-- (DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN is a DT - no change tracking needed)
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG        SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE      SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA  SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA       SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR    SET CHANGE_TRACKING = TRUE;
@@ -64,8 +69,12 @@
    The ONLY reader of the asset DT. DT2 and FINAL both read this table, so the
    asset -> category/country mapping and the *_DESC_KEY join keys are defined
    once.
-   Source DT already joins NPF_ASSET + WLT asset category view + decode and
-   applies the '30'/'20'/'Other Assets'/'Miscellaneous' defaults.
+   Source DT WPA_ASSET_DYN gives the instrument list (held / traded),
+   ISS_TYPE and CNTRY_RISK_DCDE only. It has no category columns, and its
+   CNTRY_RISK_DCDE_DESC defaults to 'Unknown' (Oracle returns NULL), so:
+     - category : LEFT JOIN NPF_ASSET_CATG (RPTG_TYPE='WLT'); defaults only when
+                  no mapping row exists (Oracle FETCH semantics)
+     - country  : LEFT JOIN NPF_DECODE (DCDE_TYPE='CNTRY'); NULL when not found
    ----------------------------------------------------------------------------- */
 create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN(
   INSTR_ID,
@@ -78,20 +87,37 @@ create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN(
   SUP_DESC_KEY,
   SUB_DESC_KEY,
   CNTRY_DESC_KEY
-) target_lag = DOWNSTREAM refresh_mode = AUTO initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+) target_lag = DOWNSTREAM refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
  as
 SELECT
-    x.asd_instr_id                                       AS instr_id,
-    x.asd_ast_iss_type                                   AS iss_type,
-    NULLIF(x.asd_ast_ctgr_sup_cd,   '')                  AS std_sup_code,
-    NULLIF(x.asd_ast_ctgr_sub_cd,   '')                  AS std_sub_code,
-    NULLIF(x.asd_ast_ctgr_sup_desc, '')                  AS std_sup_desc,
-    NULLIF(x.asd_ast_ctgr_sub_desc, '')                  AS std_sub_desc,
-    NULLIF(x.asd_ast_cntry_risk_desc, '')                AS cntry_desc,
-    NVL(NULLIF(x.asd_ast_ctgr_sup_desc,   ''), '#NULL#') AS sup_desc_key,
-    NVL(NULLIF(x.asd_ast_ctgr_sub_desc,   ''), '#NULL#') AS sub_desc_key,
-    NVL(NULLIF(x.asd_ast_cntry_risk_desc, ''), '#NULL#') AS cntry_desc_key
-FROM DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN x;
+    instr_id,
+    iss_type,
+    std_sup_code,
+    std_sub_code,
+    std_sup_desc,
+    std_sub_desc,
+    cntry_desc,
+    NVL(std_sup_desc, '#NULL#') AS sup_desc_key,
+    NVL(std_sub_desc, '#NULL#') AS sub_desc_key,
+    NVL(cntry_desc,   '#NULL#') AS cntry_desc_key
+FROM (
+    SELECT
+        a.instr_id,
+        a.iss_type,
+        -- FETCH overwrites all 4 defaults when a mapping row exists (even NULL values)
+        IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
+        IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
+        IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
+        IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
+        NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
+    FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN a
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+           ON ac.rptg_type = 'WLT'
+          AND ac.iss_type  = a.iss_type
+    LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+           ON d.dcde_type = 'CNTRY'
+          AND d.dcde_code = a.cntry_risk_dcde
+);
 
 
 /* -----------------------------------------------------------------------------
@@ -115,7 +141,7 @@ create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_RULE_PICK_DYN(
   R1_SUB,
   RN_SUP,
   RN_SUB
-) target_lag = DOWNSTREAM refresh_mode = AUTO initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+) target_lag = DOWNSTREAM refresh_mode = INCREMENTAL initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
  as
 WITH combo AS (
     SELECT std_sup_desc, std_sub_desc, cntry_desc,
@@ -187,7 +213,7 @@ create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN(
   CSTM_SUBCATG_CODE,
   CSTM_SUBCATG_DESC,
   NPF_SUBCATG_CODE
-) target_lag = DOWNSTREAM refresh_mode = AUTO initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+) target_lag = DOWNSTREAM refresh_mode = INCREMENTAL initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
  as
 SELECT
     ncs.schema_id,
@@ -233,7 +259,7 @@ create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG
   CSTM_SUPCATG_DESC,
   CSTM_SUBCATG_DESC,
   SCHEMA_DESC
-) target_lag = '60 minutes' refresh_mode = AUTO initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+) target_lag = '60 minutes' refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
  as
 WITH calls AS (
     SELECT

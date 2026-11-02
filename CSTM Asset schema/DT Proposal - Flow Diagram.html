@@ -69,8 +69,8 @@
     <g>
       <rect x="20" y="45" width="230" height="82" rx="10" fill="#e8eefc" stroke="#5b7bd5" stroke-width="2"/>
       <text x="135" y="72" text-anchor="middle" font-size="14" font-weight="700">WPA_ASSET_DYN</text>
-      <text x="135" y="92" text-anchor="middle" font-size="12" fill="#374151">existing asset dynamic table</text>
-      <text x="135" y="110" text-anchor="middle" font-size="12" fill="#374151">asset + WLT category + country</text>
+      <text x="135" y="92" text-anchor="middle" font-size="12" fill="#374151">existing asset DT (held / traded)</text>
+      <text x="135" y="110" text-anchor="middle" font-size="12" fill="#374151">+ NPF_ASSET_CATG + NPF_DECODE</text>
     </g>
     <g>
       <rect x="20" y="175" width="230" height="82" rx="10" fill="#e8eefc" stroke="#5b7bd5" stroke-width="2"/>
@@ -152,7 +152,8 @@
     <div class="card c-dt">
       <div class="tag">DT1 · Oracle: npf_asst_typ_mgr (6-arg)</div>
       <h3>WPA_CAS_ASSET_STD_DYN</h3>
-      Standard super / sub category and country description for each instrument.
+      Instrument list from <code>WPA_ASSET_DYN</code>, joined to <code>NPF_ASSET_CATG</code> (WLT) for the
+      standard super / sub category and <code>NPF_DECODE</code> for the country.
       Defaults <b>30 Other Assets</b> / <b>20 Miscellaneous</b> when unmapped.<br>
       <i>The only table that reads the asset source.</i>
     </div>

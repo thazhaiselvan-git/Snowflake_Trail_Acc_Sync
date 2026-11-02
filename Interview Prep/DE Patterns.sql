@@ -184,6 +184,8 @@ WHERE e.salary > m.salary;
 -- 6. MONTH-ON-MONTH GROWTH %
 -- For YoY use LAG(revenue, 12) on a full monthly series
 -- =====================================================
+
+SELECT * FROM orders;
 WITH m AS (
   SELECT DATE_TRUNC('month', order_date) AS month, SUM(amount) AS revenue
   FROM orders
@@ -199,6 +201,8 @@ ORDER BY month;
 -- 7. SESSIONIZATION: new session if gap > 30 minutes
 -- Step 1 flag a new session, Step 2 running SUM of flags
 -- =====================================================
+SELECT *   FROM events;
+
 WITH f AS (
   SELECT user_id, event_ts,
     IFF(DATEDIFF(minute,

@@ -253,14 +253,14 @@ Each Oracle unit becomes one declarative layer. The final build is **4 dynamic t
 
 | Oracle | Snowflake layer |
 |---|---|
-| Unit A (+ country lookup in B) | **DT1 `WPA_CAS_ASSET_STD_DYN`**: thin DT over the existing `DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN` (already joins `NPF_ASSET` + WLT category + decode, with the `30`/`20` defaults). Adds `NULLIF` and the 3 `*_DESC_KEY` join keys. One row per instrument. |
+| Unit A (+ country lookup in B) | **DT1 `WPA_CAS_ASSET_STD_DYN`**: existing asset DT `DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN` (held / traded instruments; DEV copy of `PROD_WPA_ASSET_DB.CORE.WPA_ASSET_DYN`) ⟕ `NPF_ASSET_CATG` (WLT, defaults `30`/`20` only when no mapping) ⟕ `NPF_DECODE` ('CNTRY', NULL when missing). Adds `NULLIF` and the 3 `*_DESC_KEY` join keys. One row per instrument. |
 | Unit C | **DT2 `WPA_CAS_RULE_PICK_DYN`**: DT1 → distinct (sup_desc, sub_desc, cntry_desc) → rule evaluation → first and last matching rule per schema |
 | `v_rec_cnt` + `cstm_asset_cursor` | **DT3 `WPA_CAS_CSTM_ROW_DYN`**: one active `NPF_CSTM_SCHEMA` row per (schema, instr, 'WLT') |
 | Unit B IF/ELSE | **Final `WPA_CSTM_ASSET_SCHEMA_CATG_DY`**: `NPF_CUST_CSTM_SCHEMA` × DT1, LEFT JOIN DT3 (Path 1) and DT2 (Path 2) |
 
 ```
-DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN
-   │  read once
+DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN + NPF_ASSET_CATG + NPF_DECODE
+   │  asset DT read once
    ▼
 DT1 WPA_CAS_ASSET_STD_DYN ───────────────────────┐
    │                                             │

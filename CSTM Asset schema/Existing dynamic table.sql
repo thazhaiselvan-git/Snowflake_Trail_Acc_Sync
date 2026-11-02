@@ -572,3 +572,4 @@ LEFT JOIN PROD_WPA_REPORT_DB.core.wpa_code_desc_vw sp
     ON sp.code = ast.sp_qual_dcde           AND sp.catg     = 'SP'
 LEFT JOIN PROD_WPA_REPORT_DB.core.wpa_code_desc_vw region
     ON region.code = ast.cntry_risk_dcde    AND region.catg = 'REGION';
+
