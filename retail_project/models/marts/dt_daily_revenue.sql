@@ -2,7 +2,7 @@
 -- refresh_mode FULL avoids needing change tracking on the RAW tables (DBT_ROLE doesn't own them).
 {{ config(
     materialized='dynamic_table',
-    snowflake_warehouse='DBT_WH',
+    snowflake_warehouse=target.warehouse,
     target_lag='1 day',
     refresh_mode='FULL'
 ) }}

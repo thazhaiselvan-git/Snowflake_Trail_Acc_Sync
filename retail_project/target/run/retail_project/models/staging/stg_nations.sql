@@ -1,5 +1,5 @@
 
-  create or replace   view RETAIL_DBT.DEV.stg_nations
+  create or replace   view RETAIL_DBT.PROD.stg_nations
   
    as (
     select

@@ -10,7 +10,7 @@ select
 
 
 select region_manager
-from RETAIL_DBT.DEV.dim_customers
+from RETAIL_DBT.PROD.dim_customers
 where region_manager is null
 
 

@@ -13,7 +13,7 @@ with all_values as (
         order_status as value_field,
         count(*) as n_records
 
-    from RETAIL_DBT.DEV.stg_orders
+    from RETAIL_DBT.PROD.stg_orders
     group by order_status
 
 )

@@ -2,7 +2,7 @@
   
     
 
-        create or replace transient table RETAIL_DBT.DEV.fct_orders
+        create or replace transient table RETAIL_DBT.PROD.fct_orders
          as
         (
 
@@ -13,7 +13,7 @@ select
     count(*)                                                        as line_count,
     sum(quantity)                                                   as total_quantity,
     sum(round(extended_price * (1 - discount), 2))             as net_revenue
-from RETAIL_DBT.DEV.stg_lineitems
+from RETAIL_DBT.PROD.stg_lineitems
 group by order_key
 ) select
     o.order_key,
@@ -26,10 +26,10 @@ group by order_key
     i.line_count,
     i.total_quantity,
     i.net_revenue
-from RETAIL_DBT.DEV.stg_orders o
+from RETAIL_DBT.PROD.stg_orders o
 left join __dbt__cte__int_order_items i
     on o.order_key = i.order_key
-left join RETAIL_DBT.DEV.order_status_lookup s
+left join RETAIL_DBT.PROD.order_status_lookup s
     on o.order_status = s.status_code
 
 

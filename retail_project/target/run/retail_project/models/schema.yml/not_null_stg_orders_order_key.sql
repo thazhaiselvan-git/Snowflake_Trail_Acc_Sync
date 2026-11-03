@@ -10,7 +10,7 @@ select
 
 
 select order_key
-from RETAIL_DBT.DEV.stg_orders
+from RETAIL_DBT.PROD.stg_orders
 where order_key is null
 
 

@@ -1,5 +1,5 @@
 
-  create or replace   view RETAIL_DBT.DEV.stg_orders
+  create or replace   view RETAIL_DBT.PROD.stg_orders
   
    as (
     select

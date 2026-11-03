@@ -2,7 +2,7 @@
         
 
     
-        create dynamic table RETAIL_DBT.DEV.dt_daily_revenue
+        create dynamic table RETAIL_DBT.PROD.dt_daily_revenue
         target_lag = '1 day'
         warehouse = DBT_WH
         refresh_mode = FULL
@@ -18,7 +18,7 @@ select
     order_date,
     count(*)         as orders,
     sum(total_price) as gross_revenue
-from RETAIL_DBT.DEV.stg_orders
+from RETAIL_DBT.PROD.stg_orders
 group by order_date
         )
 

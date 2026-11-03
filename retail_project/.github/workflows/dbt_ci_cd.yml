@@ -1,0 +1,93 @@
+name: dbt CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------
+  # CI: on every pull request, build + test in the DEV account
+  # in a throw-away schema RETAIL_DBT.CI_PR_<number>
+  # ---------------------------------------------------------------
+  ci:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      CI_SCHEMA: CI_PR_${{ github.event.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dbt
+        run: pip install "dbt-snowflake~=1.9.0"
+
+      - name: Write key + profiles.yml
+        run: |
+          mkdir -p ~/.dbt
+          echo "${{ secrets.SNOWFLAKE_DEV_PRIVATE_KEY }}" > ~/.dbt/dev_key.p8
+          chmod 600 ~/.dbt/dev_key.p8
+          cat > ~/.dbt/profiles.yml <<EOF
+          retail_project:
+            target: ci
+            outputs:
+              ci:
+                type: snowflake
+                account: ${{ secrets.SNOWFLAKE_DEV_ACCOUNT }}
+                user: SVC_GITHUB_CI
+                authenticator: snowflake_jwt
+                private_key_path: $HOME/.dbt/dev_key.p8
+                role: DBT_ROLE
+                warehouse: DBT_WH
+                database: RETAIL_DBT
+                schema: ${CI_SCHEMA}
+                threads: 4
+          EOF
+
+      - name: dbt build (CI schema)
+        run: dbt build --target ci
+
+      - name: Drop CI schema
+        if: always()
+        run: dbt run-operation drop_ci_schema --args "{schema: ${CI_SCHEMA}}" --target ci
+
+  # ---------------------------------------------------------------
+  # CD: on merge to main, redeploy + run in the PROD account
+  # ---------------------------------------------------------------
+  deploy-prod:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Snowflake CLI
+        run: pip install snowflake-cli
+
+      - name: Write key
+        run: |
+          echo "${{ secrets.SNOWFLAKE_PROD_PRIVATE_KEY }}" > prod_key.p8
+          chmod 600 prod_key.p8
+
+      - name: Fetch, redeploy and run dbt project in PROD
+        run: |
+          snow sql --temporary-connection \
+            --account "${{ secrets.SNOWFLAKE_PROD_ACCOUNT }}" \
+            --user SVC_GITHUB_DEPLOY \
+            --authenticator SNOWFLAKE_JWT \
+            --private-key-file prod_key.p8 \
+            --role DBT_ROLE \
+            --warehouse DBT_WH \
+            -q "
+              ALTER GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO FETCH;
+              ALTER DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT
+                DEPLOY FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main';
+              EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
+            "

@@ -2,11 +2,11 @@
     
     
     
-    create table RETAIL_DBT.DEV.region_managers (region_name text,manager_name text)
+    create table RETAIL_DBT.PROD.region_managers (region_name text,manager_name text)
   ;
     -- dbt seed --
     
-            insert into RETAIL_DBT.DEV.region_managers (region_name, manager_name) values
+            insert into RETAIL_DBT.PROD.region_managers (region_name, manager_name) values
             (%s,%s),(%s,%s),(%s,%s),(%s,%s),(%s,%s)
         
 

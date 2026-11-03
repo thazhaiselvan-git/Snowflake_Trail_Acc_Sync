@@ -26,3 +26,5 @@ left join __dbt__cte__int_order_items i
 left join RETAIL_DBT.DEV.order_status_lookup s
     on o.order_status = s.status_code
 
+
+where o.order_date >= (select max(order_date) from RETAIL_DBT.DEV.fct_orders)

@@ -3,7 +3,7 @@
   
     
 
-        create or replace transient table RETAIL_DBT.DEV.scd_customers
+        create or replace transient table RETAIL_DBT.PROD.scd_customers
          as
         (
     

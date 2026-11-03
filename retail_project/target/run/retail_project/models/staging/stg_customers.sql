@@ -1,5 +1,5 @@
 
-  create or replace   view RETAIL_DBT.DEV.stg_customers
+  create or replace   view RETAIL_DBT.PROD.stg_customers
   
    as (
     -- materialized: view (from dbt_project.yml)

@@ -1,5 +1,5 @@
 
-  create or replace   view RETAIL_DBT.DEV.stg_lineitems
+  create or replace   view RETAIL_DBT.PROD.stg_lineitems
   
    as (
     select

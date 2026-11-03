@@ -9,13 +9,13 @@ select
 
 with child as (
     select customer_key as from_field
-    from RETAIL_DBT.DEV.fct_orders
+    from RETAIL_DBT.PROD.fct_orders
     where customer_key is not null
 ),
 
 parent as (
     select customer_key as to_field
-    from RETAIL_DBT.DEV.dim_customers
+    from RETAIL_DBT.PROD.dim_customers
 )
 
 select

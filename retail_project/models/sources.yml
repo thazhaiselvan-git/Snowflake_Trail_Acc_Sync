@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: retail
-    database: RETAIL_DBT
+    database: "{{ target.database }}"
     schema: RAW
     tables:
       - name: customers

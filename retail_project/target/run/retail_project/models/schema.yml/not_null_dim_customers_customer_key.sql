@@ -10,7 +10,7 @@ select
 
 
 select customer_key
-from RETAIL_DBT.DEV.dim_customers
+from RETAIL_DBT.PROD.dim_customers
 where customer_key is null
 
 
