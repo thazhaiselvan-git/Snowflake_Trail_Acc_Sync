@@ -1,0 +1,23 @@
+# Used only when the project runs inside Snowflake (Workspaces / deployed DBT PROJECT object).
+# Local dbt ignores this file and uses ~/.dbt/profiles.yml instead.
+retail_project:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "not needed"
+      user: "not needed"
+      role: DBT_ROLE
+      warehouse: DBT_WH
+      database: RETAIL_DBT
+      schema: DEV
+      threads: 8
+    prod:
+      type: snowflake
+      account: "not needed"
+      user: "not needed"
+      role: DBT_ROLE
+      warehouse: DBT_WH
+      database: RETAIL_DBT
+      schema: PROD
+      threads: 8

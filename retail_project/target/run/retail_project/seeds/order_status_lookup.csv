@@ -1,0 +1,14 @@
+
+    
+    
+    
+    create table RETAIL_DBT.DEV.order_status_lookup (status_code text,status_description text)
+  ;
+    -- dbt seed --
+    
+            insert into RETAIL_DBT.DEV.order_status_lookup (status_code, status_description) values
+            (%s,%s),(%s,%s),(%s,%s)
+        
+
+;
+  

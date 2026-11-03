@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: retail
+    database: RETAIL_DBT
+    schema: RAW
+    tables:
+      - name: customers
+        loaded_at_field: updated_at
+        freshness:
+          warn_after: { count: 7, period: day }
+      - name: orders
+      - name: lineitems
+      - name: nations
+      - name: regions

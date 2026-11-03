@@ -1,0 +1,4 @@
+status_code,status_description
+F,Fulfilled
+O,Open
+P,Partially fulfilled

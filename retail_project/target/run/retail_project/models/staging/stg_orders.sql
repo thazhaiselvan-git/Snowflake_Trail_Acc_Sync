@@ -1,0 +1,14 @@
+
+  create or replace   view RETAIL_DBT.DEV.stg_orders
+  
+   as (
+    select
+    o_orderkey      as order_key,
+    o_custkey       as customer_key,
+    o_orderstatus   as order_status,
+    o_totalprice    as total_price,
+    o_orderdate     as order_date,
+    o_orderpriority as order_priority
+from RETAIL_DBT.RAW.orders
+  );
+

@@ -1,0 +1,1079 @@
+
+
+============================== 19:33:50.255531 | 0877d239-5566-4962-89a1-e10c74253293 ==============================
+[0m19:33:50.255531 [info ] [Dummy-1   ]: Running with dbt=1.9.4
+[0m19:33:50.256432 [debug] [Dummy-1   ]: running dbt with arguments {'printer_width': '80', 'indirect_selection': 'eager', 'log_cache_events': 'False', 'write_json': 'True', 'partial_parse': 'True', 'cache_selected_only': 'False', 'warn_error': 'None', 'debug': 'False', 'fail_fast': 'False', 'log_path': '/tmp/dbt/logs', 'version_check': 'True', 'profiles_dir': '/tmp/dbt_effective_profiles_l1t03748', 'use_colors': 'True', 'use_experimental_parser': 'False', 'no_print': 'None', 'quiet': 'False', 'empty': 'False', 'log_format': 'default', 'introspect': 'True', 'warn_error_options': 'WarnErrorOptions(include=[], exclude=[])', 'static_parser': 'True', 'target_path': 'None', 'invocation_command': 'dbt ', 'send_anonymous_usage_stats': 'False'}
+[0m19:33:50.451169 [info ] [Dummy-1   ]: State adapter: dbt-state v0.0.0 is disabled
+[0m19:33:50.540583 [info ] [Dummy-1   ]: Registered adapter: snowflake=1.9.2
+[0m19:33:51.057273 [debug] [Dummy-1   ]: checksum: 53ed91fada2233efb98368d1716b44ab532c83a9c293cf1890b7905d5b45fb25, vars: {}, profile: , target: dev, version: 1.9.4
+[0m19:33:51.059048 [info ] [Dummy-1   ]: Unable to do partial parsing because saved manifest not found. Starting full parse.
+[0m19:33:53.482918 [debug] [Dummy-1   ]: Wrote artifact WritableManifest to /tmp/dbt/target/manifest.json
+[0m19:33:53.485047 [debug] [Dummy-1   ]: Wrote artifact SemanticManifest to /tmp/dbt/target/semantic_manifest.json
+[0m19:33:53.550729 [info ] [Dummy-1   ]: Found 9 models, 2 snapshots, 17 data tests, 2 seeds, 5 sources, 475 macros
+[0m19:33:53.554875 [info ] [Dummy-1   ]: 
+[0m19:33:53.555452 [info ] [Dummy-1   ]: Concurrency: 8 threads (target='dev')
+[0m19:33:53.555891 [info ] [Dummy-1   ]: 
+[0m19:33:53.556641 [debug] [Dummy-1   ]: Acquiring new snowflake connection 'master'
+[0m19:33:53.563663 [debug] [ThreadPool]: Acquiring new snowflake connection 'list_RETAIL_DBT'
+[0m19:33:53.649500 [debug] [ThreadPool]: Using snowflake connection "list_RETAIL_DBT"
+[0m19:33:53.650101 [debug] [ThreadPool]: On list_RETAIL_DBT: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "connection_name": "list_RETAIL_DBT"} */
+show terse schemas in database RETAIL_DBT
+    limit 10000
+[0m19:33:53.650643 [debug] [ThreadPool]: Opening a new connection, currently in state init
+[0m19:33:54.039501 [debug] [ThreadPool]: SQL status: SUCCESS 5 in 0.389 seconds
+[0m19:33:54.044129 [debug] [ThreadPool]: Re-using an available connection from the pool (formerly list_RETAIL_DBT, now list_RETAIL_DBT_DEV)
+[0m19:33:54.056516 [debug] [ThreadPool]: Using snowflake connection "list_RETAIL_DBT_DEV"
+[0m19:33:54.057085 [debug] [ThreadPool]: On list_RETAIL_DBT_DEV: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "connection_name": "list_RETAIL_DBT_DEV"} */
+alter session set quoted_identifiers_ignore_case = false;
+[0m19:33:54.524718 [debug] [ThreadPool]: SQL status: SUCCESS 1 in 0.467 seconds
+[0m19:33:54.529533 [debug] [ThreadPool]: Using snowflake connection "list_RETAIL_DBT_DEV"
+[0m19:33:54.530071 [debug] [ThreadPool]: On list_RETAIL_DBT_DEV: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "connection_name": "list_RETAIL_DBT_DEV"} */
+show objects in RETAIL_DBT.DEV
+    limit 10000
+    
+;
+[0m19:33:54.949889 [debug] [ThreadPool]: SQL status: SUCCESS 0 in 0.419 seconds
+[0m19:33:54.951920 [debug] [ThreadPool]: Using snowflake connection "list_RETAIL_DBT_DEV"
+[0m19:33:54.952434 [debug] [ThreadPool]: On list_RETAIL_DBT_DEV: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "connection_name": "list_RETAIL_DBT_DEV"} */
+alter session unset quoted_identifiers_ignore_case;
+[0m19:33:55.060892 [debug] [ThreadPool]: SQL status: SUCCESS 1 in 0.108 seconds
+[0m19:33:55.077305 [debug] [Thread-2 (]: Began running node model.retail_project.stg_customers
+[0m19:33:55.077990 [debug] [Thread-3 (]: Began running node model.retail_project.stg_lineitems
+[0m19:33:55.078650 [debug] [Thread-4 (]: Began running node model.retail_project.stg_nations
+[0m19:33:55.079231 [debug] [Thread-5 (]: Began running node model.retail_project.stg_orders
+[0m19:33:55.079797 [debug] [Thread-6 (]: Began running node seed.retail_project.order_status_lookup
+[0m19:33:55.080378 [debug] [Thread-7 (]: Began running node seed.retail_project.region_managers
+[0m19:33:55.081049 [info ] [Thread-2 (]: 1 of 29 START sql view model DEV.stg_customers ................................. [RUN]
+[0m19:33:55.081922 [debug] [Thread-8 (]: Began running node snapshot.retail_project.scd_customers
+[0m19:33:55.082578 [debug] [Thread-9 (]: Began running node snapshot.retail_project.scd_orders
+[0m19:33:55.083279 [info ] [Thread-3 (]: 2 of 29 START sql view model DEV.stg_lineitems ................................. [RUN]
+[0m19:33:55.083944 [info ] [Thread-4 (]: 3 of 29 START sql view model DEV.stg_nations ................................... [RUN]
+[0m19:33:55.084644 [info ] [Thread-5 (]: 4 of 29 START sql view model DEV.stg_orders .................................... [RUN]
+[0m19:33:55.085334 [info ] [Thread-6 (]: 5 of 29 START seed file DEV.order_status_lookup ................................ [RUN]
+[0m19:33:55.085973 [info ] [Thread-7 (]: 6 of 29 START seed file DEV.region_managers .................................... [RUN]
+[0m19:33:55.086723 [debug] [Thread-2 (]: Re-using an available connection from the pool (formerly list_RETAIL_DBT_DEV, now model.retail_project.stg_customers)
+[0m19:33:55.087348 [info ] [Thread-8 (]: 7 of 29 START snapshot DEV.scd_customers ....................................... [RUN]
+[0m19:33:55.087997 [info ] [Thread-9 (]: 8 of 29 START snapshot DEV.scd_orders .......................................... [RUN]
+[0m19:33:55.088715 [debug] [Thread-3 (]: Acquiring new snowflake connection 'model.retail_project.stg_lineitems'
+[0m19:33:55.089436 [debug] [Thread-4 (]: Acquiring new snowflake connection 'model.retail_project.stg_nations'
+[0m19:33:55.090047 [debug] [Thread-5 (]: Acquiring new snowflake connection 'model.retail_project.stg_orders'
+[0m19:33:55.090776 [debug] [Thread-6 (]: Acquiring new snowflake connection 'seed.retail_project.order_status_lookup'
+[0m19:33:55.091429 [debug] [Thread-7 (]: Acquiring new snowflake connection 'seed.retail_project.region_managers'
+[0m19:33:55.091929 [debug] [Thread-2 (]: Began compiling node model.retail_project.stg_customers
+[0m19:33:55.092530 [debug] [Thread-8 (]: Acquiring new snowflake connection 'snapshot.retail_project.scd_customers'
+[0m19:33:55.093170 [debug] [Thread-9 (]: Acquiring new snowflake connection 'snapshot.retail_project.scd_orders'
+[0m19:33:55.093654 [debug] [Thread-3 (]: Began compiling node model.retail_project.stg_lineitems
+[0m19:33:55.094116 [debug] [Thread-4 (]: Began compiling node model.retail_project.stg_nations
+[0m19:33:55.094653 [debug] [Thread-5 (]: Began compiling node model.retail_project.stg_orders
+[0m19:33:55.095155 [debug] [Thread-6 (]: Began compiling node seed.retail_project.order_status_lookup
+[0m19:33:55.095633 [debug] [Thread-7 (]: Began compiling node seed.retail_project.region_managers
+[0m19:33:55.104345 [debug] [Thread-2 (]: Writing injected SQL for node "model.retail_project.stg_customers"
+[0m19:33:55.104942 [debug] [Thread-8 (]: Began compiling node snapshot.retail_project.scd_customers
+[0m19:33:55.105446 [debug] [Thread-9 (]: Began compiling node snapshot.retail_project.scd_orders
+[0m19:33:55.111054 [debug] [Thread-3 (]: Writing injected SQL for node "model.retail_project.stg_lineitems"
+[0m19:33:55.115470 [debug] [Thread-4 (]: Writing injected SQL for node "model.retail_project.stg_nations"
+[0m19:33:55.119798 [debug] [Thread-5 (]: Writing injected SQL for node "model.retail_project.stg_orders"
+[0m19:33:55.120409 [debug] [Thread-6 (]: Began executing node seed.retail_project.order_status_lookup
+[0m19:33:55.120916 [debug] [Thread-7 (]: Began executing node seed.retail_project.region_managers
+[0m19:33:55.126243 [debug] [Thread-8 (]: Began executing node snapshot.retail_project.scd_customers
+[0m19:33:55.131353 [debug] [Thread-9 (]: Began executing node snapshot.retail_project.scd_orders
+[0m19:33:55.132089 [debug] [Thread-2 (]: Began executing node model.retail_project.stg_customers
+[0m19:33:55.133031 [debug] [Thread-3 (]: Began executing node model.retail_project.stg_lineitems
+[0m19:33:55.133892 [debug] [Thread-4 (]: Began executing node model.retail_project.stg_nations
+[0m19:33:55.150612 [debug] [Thread-5 (]: Began executing node model.retail_project.stg_orders
+[0m19:33:55.228864 [debug] [Thread-6 (]: Using snowflake connection "seed.retail_project.order_status_lookup"
+[0m19:33:55.230183 [debug] [Thread-7 (]: Using snowflake connection "seed.retail_project.region_managers"
+[0m19:33:55.423625 [debug] [Thread-8 (]: Using snowflake connection "snapshot.retail_project.scd_customers"
+[0m19:33:55.425278 [debug] [Thread-9 (]: Using snowflake connection "snapshot.retail_project.scd_orders"
+[0m19:33:55.438187 [debug] [Thread-2 (]: Writing runtime sql for node "model.retail_project.stg_customers"
+[0m19:33:55.442659 [debug] [Thread-3 (]: Writing runtime sql for node "model.retail_project.stg_lineitems"
+[0m19:33:55.448540 [debug] [Thread-4 (]: Writing runtime sql for node "model.retail_project.stg_nations"
+[0m19:33:55.452773 [debug] [Thread-5 (]: Writing runtime sql for node "model.retail_project.stg_orders"
+[0m19:33:55.453474 [debug] [Thread-6 (]: On seed.retail_project.order_status_lookup: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.order_status_lookup"} */
+create table RETAIL_DBT.DEV.order_status_lookup (status_code text,status_description text)
+[0m19:33:55.454067 [debug] [Thread-7 (]: On seed.retail_project.region_managers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.region_managers"} */
+create table RETAIL_DBT.DEV.region_managers (region_name text,manager_name text)
+[0m19:33:55.454767 [debug] [Thread-8 (]: On snapshot.retail_project.scd_customers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_customers"} */
+/* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_customers"} */
+select * from (
+        
+    
+
+    select *,
+        md5(coalesce(cast(c_custkey as varchar ), '')
+         || '|' || coalesce(cast(updated_at as varchar ), '')
+        ) as dbt_scd_id,
+        updated_at as dbt_updated_at,
+        updated_at as dbt_valid_from,
+        
+  
+  coalesce(nullif(updated_at, updated_at), null)
+  as dbt_valid_to
+from (
+        
+
+select * from RETAIL_DBT.RAW.customers
+    ) sbq
+
+
+
+    ) as __dbt_sbq
+    where false
+    limit 0
+[0m19:33:55.455394 [debug] [Thread-9 (]: On snapshot.retail_project.scd_orders: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_orders"} */
+/* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_orders"} */
+select * from (
+        
+    
+
+    select *,
+        md5(coalesce(cast(o_orderkey as varchar ), '')
+         || '|' || coalesce(cast(to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as varchar ), '')
+        ) as dbt_scd_id,
+        to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as dbt_updated_at,
+        to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as dbt_valid_from,
+        
+  
+  coalesce(nullif(to_timestamp_ntz(convert_timezone('UTC', current_timestamp())), to_timestamp_ntz(convert_timezone('UTC', current_timestamp()))), null)
+  as dbt_valid_to
+from (
+        
+
+select * from RETAIL_DBT.RAW.orders
+    ) sbq
+
+
+
+    ) as __dbt_sbq
+    where false
+    limit 0
+[0m19:33:55.457661 [debug] [Thread-2 (]: Using snowflake connection "model.retail_project.stg_customers"
+[0m19:33:55.459411 [debug] [Thread-3 (]: Using snowflake connection "model.retail_project.stg_lineitems"
+[0m19:33:55.460440 [debug] [Thread-4 (]: Using snowflake connection "model.retail_project.stg_nations"
+[0m19:33:55.461084 [debug] [Thread-6 (]: Opening a new connection, currently in state init
+[0m19:33:55.462062 [debug] [Thread-5 (]: Using snowflake connection "model.retail_project.stg_orders"
+[0m19:33:55.462657 [debug] [Thread-7 (]: Opening a new connection, currently in state init
+[0m19:33:55.463202 [debug] [Thread-8 (]: Opening a new connection, currently in state init
+[0m19:33:55.463699 [debug] [Thread-9 (]: Opening a new connection, currently in state init
+[0m19:33:55.464280 [debug] [Thread-2 (]: On model.retail_project.stg_customers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.stg_customers"} */
+create or replace   view RETAIL_DBT.DEV.stg_customers
+  
+   as (
+    -- materialized: view (from dbt_project.yml)
+select
+    c_custkey    as customer_key,
+    c_name       as customer_name,
+    c_address    as address,
+    c_nationkey  as nation_key,
+    c_phone      as phone,
+    c_acctbal    as account_balance,
+    c_mktsegment as market_segment,
+    updated_at
+from RETAIL_DBT.RAW.customers
+  );
+[0m19:33:55.464849 [debug] [Thread-3 (]: On model.retail_project.stg_lineitems: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.stg_lineitems"} */
+create or replace   view RETAIL_DBT.DEV.stg_lineitems
+  
+   as (
+    select
+    l_orderkey      as order_key,
+    l_linenumber    as line_number,
+    l_partkey       as part_key,
+    l_quantity      as quantity,
+    l_extendedprice as extended_price,
+    l_discount      as discount,
+    l_tax           as tax,
+    l_shipdate      as ship_date
+from RETAIL_DBT.RAW.lineitems
+  );
+[0m19:33:55.465453 [debug] [Thread-4 (]: On model.retail_project.stg_nations: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.stg_nations"} */
+create or replace   view RETAIL_DBT.DEV.stg_nations
+  
+   as (
+    select
+    n.n_nationkey as nation_key,
+    n.n_name      as nation_name,
+    r.r_regionkey as region_key,
+    r.r_name      as region_name
+from RETAIL_DBT.RAW.nations n
+join RETAIL_DBT.RAW.regions r
+    on n.n_regionkey = r.r_regionkey
+  );
+[0m19:33:55.466208 [debug] [Thread-5 (]: On model.retail_project.stg_orders: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.stg_orders"} */
+create or replace   view RETAIL_DBT.DEV.stg_orders
+  
+   as (
+    select
+    o_orderkey      as order_key,
+    o_custkey       as customer_key,
+    o_orderstatus   as order_status,
+    o_totalprice    as total_price,
+    o_orderdate     as order_date,
+    o_orderpriority as order_priority
+from RETAIL_DBT.RAW.orders
+  );
+[0m19:33:55.467767 [debug] [Thread-3 (]: Opening a new connection, currently in state init
+[0m19:33:55.468414 [debug] [Thread-4 (]: Opening a new connection, currently in state init
+[0m19:33:55.469052 [debug] [Thread-5 (]: Opening a new connection, currently in state init
+[0m19:33:55.834278 [debug] [Thread-2 (]: SQL status: SUCCESS 1 in 0.367 seconds
+[0m19:33:55.861270 [info ] [Thread-2 (]: 1 of 29 OK created sql view model DEV.stg_customers ............................ [[32mSUCCESS 1[0m in 0.77s]
+[0m19:33:55.862144 [debug] [Thread-2 (]: Finished running node model.retail_project.stg_customers
+[0m19:33:55.863222 [debug] [Thread-2 (]: Began running node test.retail_project.not_null_stg_customers_customer_key.1484680b2f
+[0m19:33:55.863841 [info ] [Thread-2 (]: 9 of 29 START test not_null_stg_customers_customer_key ......................... [RUN]
+[0m19:33:55.864626 [debug] [Thread-2 (]: Re-using an available connection from the pool (formerly model.retail_project.stg_customers, now test.retail_project.not_null_stg_customers_customer_key.1484680b2f)
+[0m19:33:55.865839 [debug] [Thread-2 (]: Began compiling node test.retail_project.not_null_stg_customers_customer_key.1484680b2f
+[0m19:33:55.876581 [debug] [Thread-2 (]: Writing injected SQL for node "test.retail_project.not_null_stg_customers_customer_key.1484680b2f"
+[0m19:33:55.877993 [debug] [Thread-2 (]: Began executing node test.retail_project.not_null_stg_customers_customer_key.1484680b2f
+[0m19:33:55.899144 [debug] [Thread-2 (]: Writing runtime sql for node "test.retail_project.not_null_stg_customers_customer_key.1484680b2f"
+[0m19:33:55.900484 [debug] [Thread-2 (]: Using snowflake connection "test.retail_project.not_null_stg_customers_customer_key.1484680b2f"
+[0m19:33:55.901123 [debug] [Thread-2 (]: On test.retail_project.not_null_stg_customers_customer_key.1484680b2f: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_stg_customers_customer_key.1484680b2f"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select customer_key
+from RETAIL_DBT.DEV.stg_customers
+where customer_key is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:56.138968 [debug] [Thread-2 (]: SQL status: SUCCESS 1 in 0.237 seconds
+[0m19:33:56.139935 [debug] [Thread-9 (]: SQL status: SUCCESS 0 in 0.676 seconds
+[0m19:33:56.140715 [debug] [Thread-8 (]: SQL status: SUCCESS 0 in 0.677 seconds
+[0m19:33:56.145068 [info ] [Thread-2 (]: 9 of 29 PASS not_null_stg_customers_customer_key ............................... [[32mPASS[0m in 0.28s]
+[0m19:33:56.149247 [debug] [Thread-9 (]: Using snowflake connection "snapshot.retail_project.scd_orders"
+[0m19:33:56.151073 [debug] [Thread-8 (]: Using snowflake connection "snapshot.retail_project.scd_customers"
+[0m19:33:56.151879 [debug] [Thread-2 (]: Finished running node test.retail_project.not_null_stg_customers_customer_key.1484680b2f
+[0m19:33:56.152474 [debug] [Thread-9 (]: On snapshot.retail_project.scd_orders: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_orders"} */
+/* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_orders"} */
+select * from (
+        select to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as dbt_snapshot_time
+    ) as __dbt_sbq
+    where false
+    limit 0
+[0m19:33:56.153084 [debug] [Thread-8 (]: On snapshot.retail_project.scd_customers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_customers"} */
+/* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_customers"} */
+select * from (
+        select to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as dbt_snapshot_time
+    ) as __dbt_sbq
+    where false
+    limit 0
+[0m19:33:56.153795 [debug] [Thread-2 (]: Began running node test.retail_project.unique_stg_customers_customer_key.4b41940a28
+[0m19:33:56.155131 [info ] [Thread-2 (]: 10 of 29 START test unique_stg_customers_customer_key .......................... [RUN]
+[0m19:33:56.155839 [debug] [Thread-2 (]: Re-using an available connection from the pool (formerly test.retail_project.not_null_stg_customers_customer_key.1484680b2f, now test.retail_project.unique_stg_customers_customer_key.4b41940a28)
+[0m19:33:56.156383 [debug] [Thread-2 (]: Began compiling node test.retail_project.unique_stg_customers_customer_key.4b41940a28
+[0m19:33:56.164366 [debug] [Thread-7 (]: SQL status: SUCCESS 1 in 0.702 seconds
+[0m19:33:56.166219 [debug] [Thread-2 (]: Writing injected SQL for node "test.retail_project.unique_stg_customers_customer_key.4b41940a28"
+[0m19:33:56.167089 [debug] [Thread-6 (]: SQL status: SUCCESS 1 in 0.706 seconds
+[0m19:33:56.183568 [debug] [Thread-7 (]: Using snowflake connection "seed.retail_project.region_managers"
+[0m19:33:56.185994 [debug] [Thread-6 (]: Using snowflake connection "seed.retail_project.order_status_lookup"
+[0m19:33:56.186707 [debug] [Thread-2 (]: Began executing node test.retail_project.unique_stg_customers_customer_key.4b41940a28
+[0m19:33:56.187346 [debug] [Thread-7 (]: On seed.retail_project.region_managers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.region_managers"} */
+BEGIN
+[0m19:33:56.188003 [debug] [Thread-6 (]: On seed.retail_project.order_status_lookup: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.order_status_lookup"} */
+BEGIN
+[0m19:33:56.192317 [debug] [Thread-2 (]: Writing runtime sql for node "test.retail_project.unique_stg_customers_customer_key.4b41940a28"
+[0m19:33:56.194326 [debug] [Thread-2 (]: Using snowflake connection "test.retail_project.unique_stg_customers_customer_key.4b41940a28"
+[0m19:33:56.195006 [debug] [Thread-2 (]: On test.retail_project.unique_stg_customers_customer_key.4b41940a28: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.unique_stg_customers_customer_key.4b41940a28"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+select
+    customer_key as unique_field,
+    count(*) as n_records
+
+from RETAIL_DBT.DEV.stg_customers
+where customer_key is not null
+group by customer_key
+having count(*) > 1
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:56.203449 [debug] [Thread-5 (]: SQL status: SUCCESS 1 in 0.734 seconds
+[0m19:33:56.206358 [info ] [Thread-5 (]: 4 of 29 OK created sql view model DEV.stg_orders ............................... [[32mSUCCESS 1[0m in 1.12s]
+[0m19:33:56.207291 [debug] [Thread-5 (]: Finished running node model.retail_project.stg_orders
+[0m19:33:56.208252 [debug] [Thread-5 (]: Began running node test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0
+[0m19:33:56.208862 [info ] [Thread-5 (]: 11 of 29 START test accepted_values_stg_orders_order_status__F__O__P ........... [RUN]
+[0m19:33:56.209565 [debug] [Thread-5 (]: Re-using an available connection from the pool (formerly model.retail_project.stg_orders, now test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0)
+[0m19:33:56.210083 [debug] [Thread-5 (]: Began compiling node test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0
+[0m19:33:56.216142 [debug] [Thread-5 (]: Writing injected SQL for node "test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0"
+[0m19:33:56.217343 [debug] [Thread-4 (]: SQL status: SUCCESS 1 in 0.749 seconds
+[0m19:33:56.217922 [debug] [Thread-5 (]: Began executing node test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0
+[0m19:33:56.220740 [info ] [Thread-4 (]: 3 of 29 OK created sql view model DEV.stg_nations .............................. [[32mSUCCESS 1[0m in 1.13s]
+[0m19:33:56.227577 [debug] [Thread-5 (]: Writing runtime sql for node "test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0"
+[0m19:33:56.228413 [debug] [Thread-4 (]: Finished running node model.retail_project.stg_nations
+[0m19:33:56.229353 [debug] [Thread-4 (]: Began running node test.retail_project.not_null_stg_orders_order_key.6dbbb0203d
+[0m19:33:56.230732 [debug] [Thread-5 (]: Using snowflake connection "test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0"
+[0m19:33:56.231299 [info ] [Thread-4 (]: 12 of 29 START test not_null_stg_orders_order_key .............................. [RUN]
+[0m19:33:56.231945 [debug] [Thread-5 (]: On test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+with all_values as (
+
+    select
+        order_status as value_field,
+        count(*) as n_records
+
+    from RETAIL_DBT.DEV.stg_orders
+    group by order_status
+
+)
+
+select *
+from all_values
+where value_field not in (
+    'F','O','P'
+)
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:56.232640 [debug] [Thread-4 (]: Re-using an available connection from the pool (formerly model.retail_project.stg_nations, now test.retail_project.not_null_stg_orders_order_key.6dbbb0203d)
+[0m19:33:56.233553 [debug] [Thread-4 (]: Began compiling node test.retail_project.not_null_stg_orders_order_key.6dbbb0203d
+[0m19:33:56.239455 [debug] [Thread-4 (]: Writing injected SQL for node "test.retail_project.not_null_stg_orders_order_key.6dbbb0203d"
+[0m19:33:56.240280 [debug] [Thread-9 (]: SQL status: SUCCESS 0 in 0.086 seconds
+[0m19:33:56.241359 [debug] [Thread-9 (]: Writing runtime sql for node "snapshot.retail_project.scd_orders"
+[0m19:33:56.241950 [debug] [Thread-4 (]: Began executing node test.retail_project.not_null_stg_orders_order_key.6dbbb0203d
+[0m19:33:56.246541 [debug] [Thread-4 (]: Writing runtime sql for node "test.retail_project.not_null_stg_orders_order_key.6dbbb0203d"
+[0m19:33:56.247354 [debug] [Thread-8 (]: SQL status: SUCCESS 0 in 0.093 seconds
+[0m19:33:56.249015 [debug] [Thread-9 (]: Using snowflake connection "snapshot.retail_project.scd_orders"
+[0m19:33:56.250072 [debug] [Thread-8 (]: Writing runtime sql for node "snapshot.retail_project.scd_customers"
+[0m19:33:56.251193 [debug] [Thread-4 (]: Using snowflake connection "test.retail_project.not_null_stg_orders_order_key.6dbbb0203d"
+[0m19:33:56.252038 [debug] [Thread-3 (]: SQL status: SUCCESS 1 in 0.784 seconds
+[0m19:33:56.252676 [debug] [Thread-9 (]: On snapshot.retail_project.scd_orders: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_orders"} */
+create or replace transient table RETAIL_DBT.DEV.scd_orders
+         as
+        (
+    
+
+    select *,
+        md5(coalesce(cast(o_orderkey as varchar ), '')
+         || '|' || coalesce(cast(to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as varchar ), '')
+        ) as dbt_scd_id,
+        to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as dbt_updated_at,
+        to_timestamp_ntz(convert_timezone('UTC', current_timestamp())) as dbt_valid_from,
+        
+  
+  coalesce(nullif(to_timestamp_ntz(convert_timezone('UTC', current_timestamp())), to_timestamp_ntz(convert_timezone('UTC', current_timestamp()))), null)
+  as dbt_valid_to
+from (
+        
+
+select * from RETAIL_DBT.RAW.orders
+    ) sbq
+
+
+
+        );
+[0m19:33:56.253600 [debug] [Thread-4 (]: On test.retail_project.not_null_stg_orders_order_key.6dbbb0203d: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_stg_orders_order_key.6dbbb0203d"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select order_key
+from RETAIL_DBT.DEV.stg_orders
+where order_key is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:56.254942 [debug] [Thread-8 (]: Using snowflake connection "snapshot.retail_project.scd_customers"
+[0m19:33:56.257666 [info ] [Thread-3 (]: 2 of 29 OK created sql view model DEV.stg_lineitems ............................ [[32mSUCCESS 1[0m in 1.17s]
+[0m19:33:56.259010 [debug] [Thread-8 (]: On snapshot.retail_project.scd_customers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "snapshot.retail_project.scd_customers"} */
+create or replace transient table RETAIL_DBT.DEV.scd_customers
+         as
+        (
+    
+
+    select *,
+        md5(coalesce(cast(c_custkey as varchar ), '')
+         || '|' || coalesce(cast(updated_at as varchar ), '')
+        ) as dbt_scd_id,
+        updated_at as dbt_updated_at,
+        updated_at as dbt_valid_from,
+        
+  
+  coalesce(nullif(updated_at, updated_at), null)
+  as dbt_valid_to
+from (
+        
+
+select * from RETAIL_DBT.RAW.customers
+    ) sbq
+
+
+
+        );
+[0m19:33:56.259766 [debug] [Thread-3 (]: Finished running node model.retail_project.stg_lineitems
+[0m19:33:56.260734 [debug] [Thread-3 (]: Began running node test.retail_project.unique_stg_orders_order_key.93561928ed
+[0m19:33:56.261704 [info ] [Thread-3 (]: 13 of 29 START test unique_stg_orders_order_key ................................ [RUN]
+[0m19:33:56.262464 [debug] [Thread-3 (]: Re-using an available connection from the pool (formerly model.retail_project.stg_lineitems, now test.retail_project.unique_stg_orders_order_key.93561928ed)
+[0m19:33:56.263019 [debug] [Thread-3 (]: Began compiling node test.retail_project.unique_stg_orders_order_key.93561928ed
+[0m19:33:56.268933 [debug] [Thread-3 (]: Writing injected SQL for node "test.retail_project.unique_stg_orders_order_key.93561928ed"
+[0m19:33:56.269745 [debug] [Thread-3 (]: Began executing node test.retail_project.unique_stg_orders_order_key.93561928ed
+[0m19:33:56.273780 [debug] [Thread-3 (]: Writing runtime sql for node "test.retail_project.unique_stg_orders_order_key.93561928ed"
+[0m19:33:56.275049 [debug] [Thread-3 (]: Using snowflake connection "test.retail_project.unique_stg_orders_order_key.93561928ed"
+[0m19:33:56.275616 [debug] [Thread-3 (]: On test.retail_project.unique_stg_orders_order_key.93561928ed: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.unique_stg_orders_order_key.93561928ed"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+select
+    order_key as unique_field,
+    count(*) as n_records
+
+from RETAIL_DBT.DEV.stg_orders
+where order_key is not null
+group by order_key
+having count(*) > 1
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:56.282187 [debug] [Thread-7 (]: SQL status: SUCCESS 1 in 0.089 seconds
+[0m19:33:56.283191 [debug] [Thread-7 (]: Using snowflake connection "seed.retail_project.region_managers"
+[0m19:33:56.283781 [debug] [Thread-7 (]: On seed.retail_project.region_managers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.region_managers"} */
+insert into RETAIL_DBT.DEV.region_managers (region_name, manager_name) values
+            (%s,%s),(%s,%s),(%s,%s),(%s,%s),(%s,%s)...
+[0m19:33:56.287057 [debug] [Thread-6 (]: SQL status: SUCCESS 1 in 0.094 seconds
+[0m19:33:56.287904 [debug] [Thread-6 (]: Using snowflake connection "seed.retail_project.order_status_lookup"
+[0m19:33:56.288432 [debug] [Thread-6 (]: On seed.retail_project.order_status_lookup: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.order_status_lookup"} */
+insert into RETAIL_DBT.DEV.order_status_lookup (status_code, status_description) values
+            (%s,%s),(%s,%s),(%s,%s)...
+[0m19:33:56.395937 [debug] [Thread-4 (]: SQL status: SUCCESS 1 in 0.137 seconds
+[0m19:33:56.398380 [info ] [Thread-4 (]: 12 of 29 PASS not_null_stg_orders_order_key .................................... [[32mPASS[0m in 0.17s]
+[0m19:33:56.399266 [debug] [Thread-4 (]: Finished running node test.retail_project.not_null_stg_orders_order_key.6dbbb0203d
+[0m19:33:56.399926 [debug] [Thread-4 (]: Began running node model.retail_project.int_order_items
+[0m19:33:56.400686 [debug] [Thread-4 (]: Re-using an available connection from the pool (formerly test.retail_project.not_null_stg_orders_order_key.6dbbb0203d, now model.retail_project.int_order_items)
+[0m19:33:56.401257 [debug] [Thread-4 (]: Began compiling node model.retail_project.int_order_items
+[0m19:33:56.408404 [debug] [Thread-4 (]: Writing injected SQL for node "model.retail_project.int_order_items"
+[0m19:33:56.409452 [debug] [Thread-4 (]: Finished running node model.retail_project.int_order_items
+[0m19:33:56.510171 [debug] [Thread-2 (]: SQL status: SUCCESS 1 in 0.314 seconds
+[0m19:33:56.512766 [info ] [Thread-2 (]: 10 of 29 PASS unique_stg_customers_customer_key ................................ [[32mPASS[0m in 0.36s]
+[0m19:33:56.513662 [debug] [Thread-2 (]: Finished running node test.retail_project.unique_stg_customers_customer_key.4b41940a28
+[0m19:33:56.534645 [debug] [Thread-5 (]: SQL status: SUCCESS 1 in 0.301 seconds
+[0m19:33:56.537141 [info ] [Thread-5 (]: 11 of 29 PASS accepted_values_stg_orders_order_status__F__O__P ................. [[32mPASS[0m in 0.33s]
+[0m19:33:56.537981 [debug] [Thread-5 (]: Finished running node test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0
+[0m19:33:56.553949 [debug] [Thread-3 (]: SQL status: SUCCESS 1 in 0.278 seconds
+[0m19:33:56.556436 [info ] [Thread-3 (]: 13 of 29 PASS unique_stg_orders_order_key ...................................... [[32mPASS[0m in 0.29s]
+[0m19:33:56.557273 [debug] [Thread-3 (]: Finished running node test.retail_project.unique_stg_orders_order_key.93561928ed
+[0m19:33:56.558213 [debug] [Thread-4 (]: Began running node model.retail_project.dt_daily_revenue
+[0m19:33:56.559012 [info ] [Thread-4 (]: 14 of 29 START sql dynamic_table model DEV.dt_daily_revenue .................... [RUN]
+[0m19:33:56.559667 [debug] [Thread-4 (]: Re-using an available connection from the pool (formerly model.retail_project.int_order_items, now model.retail_project.dt_daily_revenue)
+[0m19:33:56.560174 [debug] [Thread-4 (]: Began compiling node model.retail_project.dt_daily_revenue
+[0m19:33:56.565465 [debug] [Thread-4 (]: Writing injected SQL for node "model.retail_project.dt_daily_revenue"
+[0m19:33:56.566312 [debug] [Thread-4 (]: Began executing node model.retail_project.dt_daily_revenue
+[0m19:33:56.585425 [debug] [Thread-4 (]: Applying CREATE to: RETAIL_DBT.DEV.dt_daily_revenue
+[0m19:33:56.597675 [debug] [Thread-4 (]: Writing runtime sql for node "model.retail_project.dt_daily_revenue"
+[0m19:33:56.599183 [debug] [Thread-4 (]: Using snowflake connection "model.retail_project.dt_daily_revenue"
+[0m19:33:56.599785 [debug] [Thread-4 (]: On model.retail_project.dt_daily_revenue: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.dt_daily_revenue"} */
+create dynamic table RETAIL_DBT.DEV.dt_daily_revenue
+        target_lag = '1 day'
+        warehouse = DBT_WH
+        refresh_mode = FULL
+
+        initialize = ON_CREATE
+
+        as (
+            -- Snowflake dynamic table: Snowflake refreshes it on its own within target_lag.
+-- refresh_mode FULL avoids needing change tracking on the RAW tables (DBT_ROLE doesn't own them).
+
+
+select
+    order_date,
+    count(*)         as orders,
+    sum(total_price) as gross_revenue
+from RETAIL_DBT.DEV.stg_orders
+group by order_date
+        )
+[0m19:33:56.717712 [debug] [Thread-7 (]: SQL status: SUCCESS 5 in 0.433 seconds
+[0m19:33:56.718672 [debug] [Thread-7 (]: Using snowflake connection "seed.retail_project.region_managers"
+[0m19:33:56.719291 [debug] [Thread-7 (]: On seed.retail_project.region_managers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.region_managers"} */
+COMMIT
+[0m19:33:56.733984 [debug] [Thread-6 (]: SQL status: SUCCESS 3 in 0.445 seconds
+[0m19:33:56.734890 [debug] [Thread-6 (]: Using snowflake connection "seed.retail_project.order_status_lookup"
+[0m19:33:56.735499 [debug] [Thread-6 (]: On seed.retail_project.order_status_lookup: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "seed.retail_project.order_status_lookup"} */
+COMMIT
+[0m19:33:57.020470 [debug] [Thread-7 (]: SQL status: SUCCESS 1 in 0.300 seconds
+[0m19:33:57.026946 [debug] [Thread-7 (]: Writing runtime SQL for node "seed.retail_project.region_managers"
+[0m19:33:57.033431 [info ] [Thread-7 (]: 6 of 29 OK loaded seed file DEV.region_managers ................................ [[32mINSERT 5[0m in 1.94s]
+[0m19:33:57.034258 [debug] [Thread-7 (]: Finished running node seed.retail_project.region_managers
+[0m19:33:57.035292 [debug] [Thread-5 (]: Began running node test.retail_project.not_null_region_managers_region_name.6d2e49b261
+[0m19:33:57.036237 [debug] [Thread-3 (]: Began running node test.retail_project.unique_region_managers_region_name.cfb1dadb63
+[0m19:33:57.036868 [info ] [Thread-5 (]: 15 of 29 START test not_null_region_managers_region_name ....................... [RUN]
+[0m19:33:57.037539 [info ] [Thread-3 (]: 16 of 29 START test unique_region_managers_region_name ......................... [RUN]
+[0m19:33:57.038231 [debug] [Thread-5 (]: Re-using an available connection from the pool (formerly test.retail_project.accepted_values_stg_orders_order_status__F__O__P.ab2f441db0, now test.retail_project.not_null_region_managers_region_name.6d2e49b261)
+[0m19:33:57.038927 [debug] [Thread-3 (]: Re-using an available connection from the pool (formerly test.retail_project.unique_stg_orders_order_key.93561928ed, now test.retail_project.unique_region_managers_region_name.cfb1dadb63)
+[0m19:33:57.039515 [debug] [Thread-5 (]: Began compiling node test.retail_project.not_null_region_managers_region_name.6d2e49b261
+[0m19:33:57.040110 [debug] [Thread-3 (]: Began compiling node test.retail_project.unique_region_managers_region_name.cfb1dadb63
+[0m19:33:57.045899 [debug] [Thread-5 (]: Writing injected SQL for node "test.retail_project.not_null_region_managers_region_name.6d2e49b261"
+[0m19:33:57.051986 [debug] [Thread-3 (]: Writing injected SQL for node "test.retail_project.unique_region_managers_region_name.cfb1dadb63"
+[0m19:33:57.052956 [debug] [Thread-5 (]: Began executing node test.retail_project.not_null_region_managers_region_name.6d2e49b261
+[0m19:33:57.059400 [debug] [Thread-3 (]: Began executing node test.retail_project.unique_region_managers_region_name.cfb1dadb63
+[0m19:33:57.060468 [debug] [Thread-5 (]: Writing runtime sql for node "test.retail_project.not_null_region_managers_region_name.6d2e49b261"
+[0m19:33:57.064513 [debug] [Thread-3 (]: Writing runtime sql for node "test.retail_project.unique_region_managers_region_name.cfb1dadb63"
+[0m19:33:57.066113 [debug] [Thread-5 (]: Using snowflake connection "test.retail_project.not_null_region_managers_region_name.6d2e49b261"
+[0m19:33:57.067092 [debug] [Thread-6 (]: SQL status: SUCCESS 1 in 0.331 seconds
+[0m19:33:57.067785 [debug] [Thread-5 (]: On test.retail_project.not_null_region_managers_region_name.6d2e49b261: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_region_managers_region_name.6d2e49b261"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select region_name
+from RETAIL_DBT.DEV.region_managers
+where region_name is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:57.069147 [debug] [Thread-3 (]: Using snowflake connection "test.retail_project.unique_region_managers_region_name.cfb1dadb63"
+[0m19:33:57.070028 [debug] [Thread-6 (]: Writing runtime SQL for node "seed.retail_project.order_status_lookup"
+[0m19:33:57.071219 [debug] [Thread-3 (]: On test.retail_project.unique_region_managers_region_name.cfb1dadb63: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.unique_region_managers_region_name.cfb1dadb63"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+select
+    region_name as unique_field,
+    count(*) as n_records
+
+from RETAIL_DBT.DEV.region_managers
+where region_name is not null
+group by region_name
+having count(*) > 1
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:57.074633 [info ] [Thread-6 (]: 5 of 29 OK loaded seed file DEV.order_status_lookup ............................ [[32mINSERT 3[0m in 1.98s]
+[0m19:33:57.075442 [debug] [Thread-6 (]: Finished running node seed.retail_project.order_status_lookup
+[0m19:33:57.076432 [debug] [Thread-7 (]: Began running node test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d
+[0m19:33:57.077017 [debug] [Thread-2 (]: Began running node test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17
+[0m19:33:57.077648 [info ] [Thread-7 (]: 17 of 29 START test not_null_order_status_lookup_status_code ................... [RUN]
+[0m19:33:57.078252 [info ] [Thread-2 (]: 18 of 29 START test unique_order_status_lookup_status_code ..................... [RUN]
+[0m19:33:57.079045 [debug] [Thread-7 (]: Re-using an available connection from the pool (formerly seed.retail_project.region_managers, now test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d)
+[0m19:33:57.079696 [debug] [Thread-2 (]: Re-using an available connection from the pool (formerly test.retail_project.unique_stg_customers_customer_key.4b41940a28, now test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17)
+[0m19:33:57.080260 [debug] [Thread-7 (]: Began compiling node test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d
+[0m19:33:57.080912 [debug] [Thread-2 (]: Began compiling node test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17
+[0m19:33:57.087634 [debug] [Thread-7 (]: Writing injected SQL for node "test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d"
+[0m19:33:57.093667 [debug] [Thread-2 (]: Writing injected SQL for node "test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17"
+[0m19:33:57.094696 [debug] [Thread-7 (]: Began executing node test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d
+[0m19:33:57.095332 [debug] [Thread-2 (]: Began executing node test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17
+[0m19:33:57.101212 [debug] [Thread-7 (]: Writing runtime sql for node "test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d"
+[0m19:33:57.105441 [debug] [Thread-2 (]: Writing runtime sql for node "test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17"
+[0m19:33:57.106950 [debug] [Thread-7 (]: Using snowflake connection "test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d"
+[0m19:33:57.107706 [debug] [Thread-7 (]: On test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select status_code
+from RETAIL_DBT.DEV.order_status_lookup
+where status_code is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:57.108763 [debug] [Thread-2 (]: Using snowflake connection "test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17"
+[0m19:33:57.109742 [debug] [Thread-2 (]: On test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+select
+    status_code as unique_field,
+    count(*) as n_records
+
+from RETAIL_DBT.DEV.order_status_lookup
+where status_code is not null
+group by status_code
+having count(*) > 1
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:57.243968 [debug] [Thread-5 (]: SQL status: SUCCESS 1 in 0.173 seconds
+[0m19:33:57.246548 [info ] [Thread-5 (]: 15 of 29 PASS not_null_region_managers_region_name ............................. [[32mPASS[0m in 0.21s]
+[0m19:33:57.247413 [debug] [Thread-5 (]: Finished running node test.retail_project.not_null_region_managers_region_name.6d2e49b261
+[0m19:33:57.254811 [debug] [Thread-3 (]: SQL status: SUCCESS 1 in 0.183 seconds
+[0m19:33:57.257097 [info ] [Thread-3 (]: 16 of 29 PASS unique_region_managers_region_name ............................... [[32mPASS[0m in 0.22s]
+[0m19:33:57.257929 [debug] [Thread-3 (]: Finished running node test.retail_project.unique_region_managers_region_name.cfb1dadb63
+[0m19:33:57.258893 [debug] [Thread-6 (]: Began running node model.retail_project.dim_customers
+[0m19:33:57.259662 [info ] [Thread-6 (]: 19 of 29 START sql table model DEV.dim_customers ............................... [RUN]
+[0m19:33:57.260326 [debug] [Thread-6 (]: Re-using an available connection from the pool (formerly seed.retail_project.order_status_lookup, now model.retail_project.dim_customers)
+[0m19:33:57.260849 [debug] [Thread-6 (]: Began compiling node model.retail_project.dim_customers
+[0m19:33:57.266230 [debug] [Thread-6 (]: Writing injected SQL for node "model.retail_project.dim_customers"
+[0m19:33:57.267091 [debug] [Thread-6 (]: Began executing node model.retail_project.dim_customers
+[0m19:33:57.278705 [debug] [Thread-6 (]: Writing runtime sql for node "model.retail_project.dim_customers"
+[0m19:33:57.280203 [debug] [Thread-6 (]: Using snowflake connection "model.retail_project.dim_customers"
+[0m19:33:57.280829 [debug] [Thread-6 (]: On model.retail_project.dim_customers: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.dim_customers"} */
+create or replace transient table RETAIL_DBT.DEV.dim_customers
+         as
+        (
+
+select
+    c.customer_key,
+    c.customer_name,
+    c.market_segment,
+    c.account_balance,
+    n.nation_name,
+    n.region_name,
+    rm.manager_name as region_manager
+from RETAIL_DBT.DEV.stg_customers c
+left join RETAIL_DBT.DEV.stg_nations n
+    on c.nation_key = n.nation_key
+left join RETAIL_DBT.DEV.region_managers rm
+    on n.region_name = rm.region_name
+        );
+[0m19:33:57.298863 [debug] [Thread-7 (]: SQL status: SUCCESS 1 in 0.189 seconds
+[0m19:33:57.301306 [info ] [Thread-7 (]: 17 of 29 PASS not_null_order_status_lookup_status_code ......................... [[32mPASS[0m in 0.22s]
+[0m19:33:57.302154 [debug] [Thread-2 (]: SQL status: SUCCESS 1 in 0.192 seconds
+[0m19:33:57.302989 [debug] [Thread-7 (]: Finished running node test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d
+[0m19:33:57.305087 [info ] [Thread-2 (]: 18 of 29 PASS unique_order_status_lookup_status_code ........................... [[32mPASS[0m in 0.23s]
+[0m19:33:57.306104 [debug] [Thread-2 (]: Finished running node test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17
+[0m19:33:57.307074 [debug] [Thread-3 (]: Began running node model.retail_project.fct_orders
+[0m19:33:57.307847 [info ] [Thread-3 (]: 20 of 29 START sql incremental model DEV.fct_orders ............................ [RUN]
+[0m19:33:57.308559 [debug] [Thread-3 (]: Re-using an available connection from the pool (formerly test.retail_project.unique_region_managers_region_name.cfb1dadb63, now model.retail_project.fct_orders)
+[0m19:33:57.309106 [debug] [Thread-3 (]: Began compiling node model.retail_project.fct_orders
+[0m19:33:57.318771 [debug] [Thread-3 (]: Writing injected SQL for node "model.retail_project.fct_orders"
+[0m19:33:57.319635 [debug] [Thread-3 (]: Began executing node model.retail_project.fct_orders
+[0m19:33:57.360099 [debug] [Thread-3 (]: Writing runtime sql for node "model.retail_project.fct_orders"
+[0m19:33:57.361925 [debug] [Thread-3 (]: Using snowflake connection "model.retail_project.fct_orders"
+[0m19:33:57.362856 [debug] [Thread-3 (]: On model.retail_project.fct_orders: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.fct_orders"} */
+create or replace transient table RETAIL_DBT.DEV.fct_orders
+         as
+        (
+
+with __dbt__cte__int_order_items as (
+-- materialized: ephemeral (from dbt_project.yml). Inlined as a CTE, never created in Snowflake.
+select
+    order_key,
+    count(*)                                                        as line_count,
+    sum(quantity)                                                   as total_quantity,
+    sum(round(extended_price * (1 - discount), 2))             as net_revenue
+from RETAIL_DBT.DEV.stg_lineitems
+group by order_key
+) select
+    o.order_key,
+    o.customer_key,
+    o.order_date,
+    o.order_status,
+    s.status_description,
+    o.order_priority,
+    o.total_price,
+    i.line_count,
+    i.total_quantity,
+    i.net_revenue
+from RETAIL_DBT.DEV.stg_orders o
+left join __dbt__cte__int_order_items i
+    on o.order_key = i.order_key
+left join RETAIL_DBT.DEV.order_status_lookup s
+    on o.order_status = s.status_code
+
+
+        );
+[0m19:33:57.571461 [debug] [Thread-8 (]: SQL status: SUCCESS 1 in 1.311 seconds
+[0m19:33:57.574756 [info ] [Thread-8 (]: 7 of 29 OK snapshotted DEV.scd_customers ....................................... [[32mSUCCESS 1[0m in 2.48s]
+[0m19:33:57.575577 [debug] [Thread-8 (]: Finished running node snapshot.retail_project.scd_customers
+[0m19:33:57.645581 [debug] [Thread-9 (]: SQL status: SUCCESS 1 in 1.387 seconds
+[0m19:33:57.648808 [info ] [Thread-9 (]: 8 of 29 OK snapshotted DEV.scd_orders .......................................... [[32mSUCCESS 1[0m in 2.56s]
+[0m19:33:57.649660 [debug] [Thread-9 (]: Finished running node snapshot.retail_project.scd_orders
+[0m19:33:58.369646 [debug] [Thread-4 (]: SQL status: SUCCESS 1 in 1.769 seconds
+[0m19:33:58.372596 [info ] [Thread-4 (]: 14 of 29 OK created sql dynamic_table model DEV.dt_daily_revenue ............... [[32mSUCCESS 1[0m in 1.81s]
+[0m19:33:58.373426 [debug] [Thread-4 (]: Finished running node model.retail_project.dt_daily_revenue
+[0m19:33:58.582381 [debug] [Thread-6 (]: SQL status: SUCCESS 1 in 1.301 seconds
+[0m19:33:58.585244 [info ] [Thread-6 (]: 19 of 29 OK created sql table model DEV.dim_customers .......................... [[32mSUCCESS 1[0m in 1.32s]
+[0m19:33:58.586010 [debug] [Thread-6 (]: Finished running node model.retail_project.dim_customers
+[0m19:33:58.586971 [debug] [Thread-7 (]: Began running node test.retail_project.not_null_dim_customers_customer_key.4bebfb3411
+[0m19:33:58.587499 [debug] [Thread-2 (]: Began running node test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9
+[0m19:33:58.587999 [debug] [Thread-5 (]: Began running node test.retail_project.unique_dim_customers_customer_key.ad8156656e
+[0m19:33:58.588677 [info ] [Thread-7 (]: 21 of 29 START test not_null_dim_customers_customer_key ........................ [RUN]
+[0m19:33:58.589357 [info ] [Thread-2 (]: 22 of 29 START test not_null_dim_customers_region_manager ...................... [RUN]
+[0m19:33:58.589963 [info ] [Thread-5 (]: 23 of 29 START test unique_dim_customers_customer_key .......................... [RUN]
+[0m19:33:58.590748 [debug] [Thread-7 (]: Re-using an available connection from the pool (formerly test.retail_project.not_null_order_status_lookup_status_code.98b06d2f2d, now test.retail_project.not_null_dim_customers_customer_key.4bebfb3411)
+[0m19:33:58.591405 [debug] [Thread-2 (]: Re-using an available connection from the pool (formerly test.retail_project.unique_order_status_lookup_status_code.5c03e8ec17, now test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9)
+[0m19:33:58.592055 [debug] [Thread-5 (]: Re-using an available connection from the pool (formerly test.retail_project.not_null_region_managers_region_name.6d2e49b261, now test.retail_project.unique_dim_customers_customer_key.ad8156656e)
+[0m19:33:58.592636 [debug] [Thread-7 (]: Began compiling node test.retail_project.not_null_dim_customers_customer_key.4bebfb3411
+[0m19:33:58.593213 [debug] [Thread-2 (]: Began compiling node test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9
+[0m19:33:58.593747 [debug] [Thread-5 (]: Began compiling node test.retail_project.unique_dim_customers_customer_key.ad8156656e
+[0m19:33:58.600354 [debug] [Thread-7 (]: Writing injected SQL for node "test.retail_project.not_null_dim_customers_customer_key.4bebfb3411"
+[0m19:33:58.606006 [debug] [Thread-2 (]: Writing injected SQL for node "test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9"
+[0m19:33:58.612118 [debug] [Thread-5 (]: Writing injected SQL for node "test.retail_project.unique_dim_customers_customer_key.ad8156656e"
+[0m19:33:58.613194 [debug] [Thread-7 (]: Began executing node test.retail_project.not_null_dim_customers_customer_key.4bebfb3411
+[0m19:33:58.614043 [debug] [Thread-2 (]: Began executing node test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9
+[0m19:33:58.619731 [debug] [Thread-7 (]: Writing runtime sql for node "test.retail_project.not_null_dim_customers_customer_key.4bebfb3411"
+[0m19:33:58.620382 [debug] [Thread-5 (]: Began executing node test.retail_project.unique_dim_customers_customer_key.ad8156656e
+[0m19:33:58.624468 [debug] [Thread-2 (]: Writing runtime sql for node "test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9"
+[0m19:33:58.628597 [debug] [Thread-5 (]: Writing runtime sql for node "test.retail_project.unique_dim_customers_customer_key.ad8156656e"
+[0m19:33:58.629677 [debug] [Thread-7 (]: Using snowflake connection "test.retail_project.not_null_dim_customers_customer_key.4bebfb3411"
+[0m19:33:58.631239 [debug] [Thread-2 (]: Using snowflake connection "test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9"
+[0m19:33:58.631896 [debug] [Thread-7 (]: On test.retail_project.not_null_dim_customers_customer_key.4bebfb3411: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_dim_customers_customer_key.4bebfb3411"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select customer_key
+from RETAIL_DBT.DEV.dim_customers
+where customer_key is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:58.633053 [debug] [Thread-5 (]: Using snowflake connection "test.retail_project.unique_dim_customers_customer_key.ad8156656e"
+[0m19:33:58.633639 [debug] [Thread-2 (]: On test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select region_manager
+from RETAIL_DBT.DEV.dim_customers
+where region_manager is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:58.634685 [debug] [Thread-5 (]: On test.retail_project.unique_dim_customers_customer_key.ad8156656e: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.unique_dim_customers_customer_key.ad8156656e"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+select
+    customer_key as unique_field,
+    count(*) as n_records
+
+from RETAIL_DBT.DEV.dim_customers
+where customer_key is not null
+group by customer_key
+having count(*) > 1
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:58.809231 [debug] [Thread-3 (]: SQL status: SUCCESS 1 in 1.446 seconds
+[0m19:33:58.819241 [debug] [Thread-7 (]: SQL status: SUCCESS 1 in 0.185 seconds
+[0m19:33:58.820084 [debug] [Thread-2 (]: SQL status: SUCCESS 1 in 0.185 seconds
+[0m19:33:58.825789 [debug] [Thread-3 (]: Applying DROP to: RETAIL_DBT.DEV.fct_orders__dbt_tmp
+[0m19:33:58.828281 [info ] [Thread-7 (]: 21 of 29 PASS not_null_dim_customers_customer_key .............................. [[32mPASS[0m in 0.24s]
+[0m19:33:58.830720 [info ] [Thread-2 (]: 22 of 29 PASS not_null_dim_customers_region_manager ............................ [[32mPASS[0m in 0.24s]
+[0m19:33:58.848698 [debug] [Thread-3 (]: Using snowflake connection "model.retail_project.fct_orders"
+[0m19:33:58.849512 [debug] [Thread-7 (]: Finished running node test.retail_project.not_null_dim_customers_customer_key.4bebfb3411
+[0m19:33:58.850259 [debug] [Thread-2 (]: Finished running node test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9
+[0m19:33:58.850943 [debug] [Thread-3 (]: On model.retail_project.fct_orders: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.fct_orders"} */
+drop view if exists RETAIL_DBT.DEV.fct_orders__dbt_tmp cascade
+[0m19:33:58.860113 [debug] [Thread-5 (]: SQL status: SUCCESS 1 in 0.224 seconds
+[0m19:33:58.862481 [info ] [Thread-5 (]: 23 of 29 PASS unique_dim_customers_customer_key ................................ [[32mPASS[0m in 0.27s]
+[0m19:33:58.863280 [debug] [Thread-5 (]: Finished running node test.retail_project.unique_dim_customers_customer_key.ad8156656e
+[0m19:33:58.943566 [debug] [Thread-3 (]: SQL status: SUCCESS 1 in 0.092 seconds
+[0m19:33:58.946635 [info ] [Thread-3 (]: 20 of 29 OK created sql incremental model DEV.fct_orders ....................... [[32mSUCCESS 1[0m in 1.64s]
+[0m19:33:58.947448 [debug] [Thread-3 (]: Finished running node model.retail_project.fct_orders
+[0m19:33:58.948871 [debug] [Thread-9 (]: Began running node test.retail_project.assert_no_negative_revenue
+[0m19:33:58.949466 [debug] [Thread-4 (]: Began running node test.retail_project.not_null_fct_orders_customer_key.af098eeeef
+[0m19:33:58.950076 [debug] [Thread-6 (]: Began running node test.retail_project.not_null_fct_orders_order_key.6a6f83ab15
+[0m19:33:58.950781 [debug] [Thread-8 (]: Began running node test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b
+[0m19:33:58.951423 [debug] [Thread-7 (]: Began running node test.retail_project.unique_fct_orders_order_key.f5e7a90273
+[0m19:33:58.952053 [info ] [Thread-9 (]: 24 of 29 START test assert_no_negative_revenue ................................. [RUN]
+[0m19:33:58.952681 [info ] [Thread-4 (]: 25 of 29 START test not_null_fct_orders_customer_key ........................... [RUN]
+[0m19:33:58.953299 [info ] [Thread-6 (]: 26 of 29 START test not_null_fct_orders_order_key .............................. [RUN]
+[0m19:33:58.953903 [info ] [Thread-8 (]: 27 of 29 START test relationships_fct_orders_customer_key__customer_key__ref_dim_customers_  [RUN]
+[0m19:33:58.954535 [info ] [Thread-7 (]: 28 of 29 START test unique_fct_orders_order_key ................................ [RUN]
+[0m19:33:58.955759 [debug] [Thread-9 (]: Re-using an available connection from the pool (formerly snapshot.retail_project.scd_orders, now test.retail_project.assert_no_negative_revenue)
+[0m19:33:58.956401 [debug] [Thread-4 (]: Re-using an available connection from the pool (formerly model.retail_project.dt_daily_revenue, now test.retail_project.not_null_fct_orders_customer_key.af098eeeef)
+[0m19:33:58.957033 [debug] [Thread-6 (]: Re-using an available connection from the pool (formerly model.retail_project.dim_customers, now test.retail_project.not_null_fct_orders_order_key.6a6f83ab15)
+[0m19:33:58.957660 [debug] [Thread-8 (]: Re-using an available connection from the pool (formerly snapshot.retail_project.scd_customers, now test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b)
+[0m19:33:58.958251 [debug] [Thread-7 (]: Re-using an available connection from the pool (formerly test.retail_project.not_null_dim_customers_customer_key.4bebfb3411, now test.retail_project.unique_fct_orders_order_key.f5e7a90273)
+[0m19:33:58.958912 [debug] [Thread-9 (]: Began compiling node test.retail_project.assert_no_negative_revenue
+[0m19:33:58.959454 [debug] [Thread-4 (]: Began compiling node test.retail_project.not_null_fct_orders_customer_key.af098eeeef
+[0m19:33:58.959950 [debug] [Thread-6 (]: Began compiling node test.retail_project.not_null_fct_orders_order_key.6a6f83ab15
+[0m19:33:58.960435 [debug] [Thread-8 (]: Began compiling node test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b
+[0m19:33:58.960950 [debug] [Thread-7 (]: Began compiling node test.retail_project.unique_fct_orders_order_key.f5e7a90273
+[0m19:33:58.967532 [debug] [Thread-9 (]: Writing injected SQL for node "test.retail_project.assert_no_negative_revenue"
+[0m19:33:58.973376 [debug] [Thread-4 (]: Writing injected SQL for node "test.retail_project.not_null_fct_orders_customer_key.af098eeeef"
+[0m19:33:58.979691 [debug] [Thread-6 (]: Writing injected SQL for node "test.retail_project.not_null_fct_orders_order_key.6a6f83ab15"
+[0m19:33:58.986887 [debug] [Thread-8 (]: Writing injected SQL for node "test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b"
+[0m19:33:58.992901 [debug] [Thread-7 (]: Writing injected SQL for node "test.retail_project.unique_fct_orders_order_key.f5e7a90273"
+[0m19:33:58.994375 [debug] [Thread-9 (]: Began executing node test.retail_project.assert_no_negative_revenue
+[0m19:33:58.995322 [debug] [Thread-4 (]: Began executing node test.retail_project.not_null_fct_orders_customer_key.af098eeeef
+[0m19:33:58.996157 [debug] [Thread-6 (]: Began executing node test.retail_project.not_null_fct_orders_order_key.6a6f83ab15
+[0m19:33:58.997094 [debug] [Thread-8 (]: Began executing node test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b
+[0m19:33:59.003279 [debug] [Thread-9 (]: Writing runtime sql for node "test.retail_project.assert_no_negative_revenue"
+[0m19:33:59.004025 [debug] [Thread-7 (]: Began executing node test.retail_project.unique_fct_orders_order_key.f5e7a90273
+[0m19:33:59.008282 [debug] [Thread-4 (]: Writing runtime sql for node "test.retail_project.not_null_fct_orders_customer_key.af098eeeef"
+[0m19:33:59.012266 [debug] [Thread-6 (]: Writing runtime sql for node "test.retail_project.not_null_fct_orders_order_key.6a6f83ab15"
+[0m19:33:59.016333 [debug] [Thread-8 (]: Writing runtime sql for node "test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b"
+[0m19:33:59.020446 [debug] [Thread-7 (]: Writing runtime sql for node "test.retail_project.unique_fct_orders_order_key.f5e7a90273"
+[0m19:33:59.021566 [debug] [Thread-9 (]: Using snowflake connection "test.retail_project.assert_no_negative_revenue"
+[0m19:33:59.022974 [debug] [Thread-4 (]: Using snowflake connection "test.retail_project.not_null_fct_orders_customer_key.af098eeeef"
+[0m19:33:59.024353 [debug] [Thread-6 (]: Using snowflake connection "test.retail_project.not_null_fct_orders_order_key.6a6f83ab15"
+[0m19:33:59.025785 [debug] [Thread-8 (]: Using snowflake connection "test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b"
+[0m19:33:59.026576 [debug] [Thread-9 (]: On test.retail_project.assert_no_negative_revenue: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.assert_no_negative_revenue"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      -- Singular test: returns rows that FAIL. Passes when no order has negative revenue.
+select order_key, net_revenue
+from RETAIL_DBT.DEV.fct_orders
+where net_revenue < 0
+      
+    ) dbt_internal_test
+[0m19:33:59.027720 [debug] [Thread-7 (]: Using snowflake connection "test.retail_project.unique_fct_orders_order_key.f5e7a90273"
+[0m19:33:59.028307 [debug] [Thread-4 (]: On test.retail_project.not_null_fct_orders_customer_key.af098eeeef: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_fct_orders_customer_key.af098eeeef"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select customer_key
+from RETAIL_DBT.DEV.fct_orders
+where customer_key is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:59.028878 [debug] [Thread-6 (]: On test.retail_project.not_null_fct_orders_order_key.6a6f83ab15: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.not_null_fct_orders_order_key.6a6f83ab15"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+
+
+select order_key
+from RETAIL_DBT.DEV.fct_orders
+where order_key is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:59.029727 [debug] [Thread-8 (]: On test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+with child as (
+    select customer_key as from_field
+    from RETAIL_DBT.DEV.fct_orders
+    where customer_key is not null
+),
+
+parent as (
+    select customer_key as to_field
+    from RETAIL_DBT.DEV.dim_customers
+)
+
+select
+    from_field
+
+from child
+left join parent
+    on child.from_field = parent.to_field
+
+where parent.to_field is null
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:59.030763 [debug] [Thread-7 (]: On test.retail_project.unique_fct_orders_order_key.f5e7a90273: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "test.retail_project.unique_fct_orders_order_key.f5e7a90273"} */
+select
+      count(*) as failures,
+      count(*) != 0 as should_warn,
+      count(*) != 0 as should_error
+    from (
+      
+    
+    
+
+select
+    order_key as unique_field,
+    count(*) as n_records
+
+from RETAIL_DBT.DEV.fct_orders
+where order_key is not null
+group by order_key
+having count(*) > 1
+
+
+
+      
+    ) dbt_internal_test
+[0m19:33:59.240558 [debug] [Thread-6 (]: SQL status: SUCCESS 1 in 0.209 seconds
+[0m19:33:59.243073 [info ] [Thread-6 (]: 26 of 29 PASS not_null_fct_orders_order_key .................................... [[32mPASS[0m in 0.29s]
+[0m19:33:59.243873 [debug] [Thread-6 (]: Finished running node test.retail_project.not_null_fct_orders_order_key.6a6f83ab15
+[0m19:33:59.253454 [debug] [Thread-9 (]: SQL status: SUCCESS 1 in 0.223 seconds
+[0m19:33:59.255919 [info ] [Thread-9 (]: 24 of 29 PASS assert_no_negative_revenue ....................................... [[32mPASS[0m in 0.30s]
+[0m19:33:59.256959 [debug] [Thread-4 (]: SQL status: SUCCESS 1 in 0.226 seconds
+[0m19:33:59.257762 [debug] [Thread-9 (]: Finished running node test.retail_project.assert_no_negative_revenue
+[0m19:33:59.260147 [info ] [Thread-4 (]: 25 of 29 PASS not_null_fct_orders_customer_key ................................. [[32mPASS[0m in 0.30s]
+[0m19:33:59.261279 [debug] [Thread-4 (]: Finished running node test.retail_project.not_null_fct_orders_customer_key.af098eeeef
+[0m19:33:59.296027 [debug] [Thread-7 (]: SQL status: SUCCESS 1 in 0.264 seconds
+[0m19:33:59.298460 [info ] [Thread-7 (]: 28 of 29 PASS unique_fct_orders_order_key ...................................... [[32mPASS[0m in 0.34s]
+[0m19:33:59.299280 [debug] [Thread-7 (]: Finished running node test.retail_project.unique_fct_orders_order_key.f5e7a90273
+[0m19:33:59.414651 [debug] [Thread-8 (]: SQL status: SUCCESS 1 in 0.383 seconds
+[0m19:33:59.417055 [info ] [Thread-8 (]: 27 of 29 PASS relationships_fct_orders_customer_key__customer_key__ref_dim_customers_  [[32mPASS[0m in 0.46s]
+[0m19:33:59.417852 [debug] [Thread-8 (]: Finished running node test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b
+[0m19:33:59.418965 [debug] [Thread-5 (]: Began running node model.retail_project.mart_sales_by_region
+[0m19:33:59.420025 [info ] [Thread-5 (]: 29 of 29 START sql table model DEV.mart_sales_by_region ........................ [RUN]
+[0m19:33:59.420750 [debug] [Thread-5 (]: Re-using an available connection from the pool (formerly test.retail_project.unique_dim_customers_customer_key.ad8156656e, now model.retail_project.mart_sales_by_region)
+[0m19:33:59.421350 [debug] [Thread-5 (]: Began compiling node model.retail_project.mart_sales_by_region
+[0m19:33:59.428716 [debug] [Thread-5 (]: Writing injected SQL for node "model.retail_project.mart_sales_by_region"
+[0m19:33:59.429534 [debug] [Thread-5 (]: Began executing node model.retail_project.mart_sales_by_region
+[0m19:33:59.433784 [debug] [Thread-5 (]: Writing runtime sql for node "model.retail_project.mart_sales_by_region"
+[0m19:33:59.435217 [debug] [Thread-5 (]: Using snowflake connection "model.retail_project.mart_sales_by_region"
+[0m19:33:59.435800 [debug] [Thread-5 (]: On model.retail_project.mart_sales_by_region: /* {"app": "dbt", "dbt_version": "1.9.4", "profile_name": "retail_project", "target_name": "dev", "node_id": "model.retail_project.mart_sales_by_region"} */
+create or replace transient table RETAIL_DBT.DEV.mart_sales_by_region
+         as
+        (
+
+select
+    c.region_name,
+    c.region_manager,
+    year(f.order_date)       as order_year,
+    count(distinct f.order_key)    as orders,
+    count(distinct f.customer_key) as customers,
+    sum(f.net_revenue)       as net_revenue
+from RETAIL_DBT.DEV.fct_orders f
+join RETAIL_DBT.DEV.dim_customers c
+    on f.customer_key = c.customer_key
+group by 1, 2, 3
+        );
+[0m19:34:00.334845 [debug] [Thread-5 (]: SQL status: SUCCESS 1 in 0.898 seconds
+[0m19:34:00.337860 [info ] [Thread-5 (]: 29 of 29 OK created sql table model DEV.mart_sales_by_region ................... [[32mSUCCESS 1[0m in 0.92s]
+[0m19:34:00.338785 [debug] [Thread-5 (]: Finished running node model.retail_project.mart_sales_by_region
+[0m19:34:00.343266 [debug] [Dummy-1   ]: Connection 'master' was properly closed.
+[0m19:34:00.344041 [debug] [Dummy-1   ]: Connection 'test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9' was left open.
+[0m19:34:00.344804 [debug] [Dummy-1   ]: On test.retail_project.not_null_dim_customers_region_manager.3f6d44c3c9: Close
+[0m19:34:00.345688 [debug] [Dummy-1   ]: Connection 'model.retail_project.fct_orders' was left open.
+[0m19:34:00.346215 [debug] [Dummy-1   ]: On model.retail_project.fct_orders: Close
+[0m19:34:00.346758 [debug] [Dummy-1   ]: Connection 'test.retail_project.not_null_fct_orders_customer_key.af098eeeef' was left open.
+[0m19:34:00.347292 [debug] [Dummy-1   ]: On test.retail_project.not_null_fct_orders_customer_key.af098eeeef: Close
+[0m19:34:00.347734 [debug] [Dummy-1   ]: Connection 'model.retail_project.mart_sales_by_region' was left open.
+[0m19:34:00.348199 [debug] [Dummy-1   ]: On model.retail_project.mart_sales_by_region: Close
+[0m19:34:00.348615 [debug] [Dummy-1   ]: Connection 'test.retail_project.not_null_fct_orders_order_key.6a6f83ab15' was left open.
+[0m19:34:00.349077 [debug] [Dummy-1   ]: On test.retail_project.not_null_fct_orders_order_key.6a6f83ab15: Close
+[0m19:34:00.349488 [debug] [Dummy-1   ]: Connection 'test.retail_project.unique_fct_orders_order_key.f5e7a90273' was left open.
+[0m19:34:00.349896 [debug] [Dummy-1   ]: On test.retail_project.unique_fct_orders_order_key.f5e7a90273: Close
+[0m19:34:00.350286 [debug] [Dummy-1   ]: Connection 'test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b' was left open.
+[0m19:34:00.350811 [debug] [Dummy-1   ]: On test.retail_project.relationships_fct_orders_customer_key__customer_key__ref_dim_customers_.018eb0a60b: Close
+[0m19:34:00.351216 [debug] [Dummy-1   ]: Connection 'test.retail_project.assert_no_negative_revenue' was left open.
+[0m19:34:00.351626 [debug] [Dummy-1   ]: On test.retail_project.assert_no_negative_revenue: Close
+[0m19:34:00.352278 [info ] [Dummy-1   ]: 
+[0m19:34:00.352807 [info ] [Dummy-1   ]: Finished running 1 dynamic table model, 1 incremental model, 2 seeds, 2 snapshots, 2 table models, 17 data tests, 4 view models in 0 hours 0 minutes and 6.80 seconds (6.80s).
+[0m19:34:00.356893 [debug] [Dummy-1   ]: Command end result
+[0m19:34:00.387033 [debug] [Dummy-1   ]: Wrote artifact WritableManifest to /tmp/dbt/target/manifest.json
+[0m19:34:00.389225 [debug] [Dummy-1   ]: Wrote artifact SemanticManifest to /tmp/dbt/target/semantic_manifest.json
+[0m19:34:00.396661 [debug] [Dummy-1   ]: Wrote artifact RunExecutionResult to /tmp/dbt/target/run_results.json
+[0m19:34:00.397245 [info ] [Dummy-1   ]: 
+[0m19:34:00.397890 [info ] [Dummy-1   ]: [32mCompleted successfully[0m
+[0m19:34:00.398462 [info ] [Dummy-1   ]: 
+[0m19:34:00.398992 [info ] [Dummy-1   ]: Done. PASS=29 WARN=0 ERROR=0 SKIP=0 TOTAL=29
+[0m19:34:00.400799 [debug] [Dummy-1   ]: Resource report: {"command_name": "build", "command_success": true, "command_wall_clock_time": 10.22213, "process_in_blocks": "0", "process_kernel_time": 0.88, "process_mem_max_rss": "562676", "process_out_blocks": "0", "process_user_time": 7.23}
+[0m19:34:00.401452 [debug] [Dummy-1   ]: Command `cli build` succeeded at 19:34:00.401195 after 10.22 seconds
+[0m19:34:00.401990 [debug] [Dummy-1   ]: Flushing usage events

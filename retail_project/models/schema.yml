@@ -1,0 +1,46 @@
+version: 2
+
+seeds:
+  - name: region_managers
+    columns:
+      - name: region_name
+        tests: [unique, not_null]
+  - name: order_status_lookup
+    columns:
+      - name: status_code
+        tests: [unique, not_null]
+
+models:
+  - name: stg_customers
+    columns:
+      - name: customer_key
+        tests: [unique, not_null]
+
+  - name: stg_orders
+    columns:
+      - name: order_key
+        tests: [unique, not_null]
+      - name: order_status
+        tests:
+          - accepted_values:
+              values: ["F", "O", "P"]
+
+  - name: dim_customers
+    description: One row per customer, enriched with nation, region and region manager.
+    columns:
+      - name: customer_key
+        tests: [unique, not_null]
+      - name: region_manager
+        tests: [not_null]
+
+  - name: fct_orders
+    description: Incremental order fact (merge on order_key).
+    columns:
+      - name: order_key
+        tests: [unique, not_null]
+      - name: customer_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customers')
+              field: customer_key

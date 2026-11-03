@@ -1,0 +1,27 @@
+name: retail_project
+version: "1.0.0"
+config-version: 2
+
+profile: retail_project
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  retail_project:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: ephemeral
+    marts:
+      +materialized: table
+
+seeds:
+  retail_project:
+    +quote_columns: false
