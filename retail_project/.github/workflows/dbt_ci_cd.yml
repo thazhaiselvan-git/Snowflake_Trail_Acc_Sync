@@ -17,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CI_SCHEMA: CI_PR_${{ github.event.number }}
+    defaults:
+      run:
+        working-directory: retail_project
     steps:
       - uses: actions/checkout@v4
 
@@ -88,6 +91,6 @@ jobs:
             -q "
               ALTER GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO FETCH;
               ALTER DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT
-                DEPLOY FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main';
+                DEPLOY FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project';
               EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
             "

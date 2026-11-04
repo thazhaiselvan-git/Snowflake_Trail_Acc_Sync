@@ -26,7 +26,7 @@
   th{background:#f1f5f9}
   td.n{font-weight:600;white-space:nowrap}
   code{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12.5px}
-  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
   .card{border-radius:8px;padding:14px;border:2px solid;font-size:13.5px;line-height:1.45}
   .card h3{margin:0 0 6px;font-size:14px}
   .card .tag{font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;opacity:.75}
@@ -40,7 +40,7 @@
 <body>
 <header>
   <h1>WPA_CSTM_ASSET_SCHEMA_CATG → Snowflake Dynamic Tables</h1>
-  <p>Replace Streams + Task + Stored Procedures with 4 dynamic tables that reproduce the Oracle <code style="background:rgba(255,255,255,.15);color:#fff">npf_asst_typ_mgr</code> + <code style="background:rgba(255,255,255,.15);color:#fff">RULE_EVALUATION</code> logic</p>
+  <p>Replace Streams + Task + Stored Procedures with 5 dynamic tables that reproduce the Oracle <code style="background:rgba(255,255,255,.15);color:#fff">npf_asst_typ_mgr</code> + <code style="background:rgba(255,255,255,.15);color:#fff">RULE_EVALUATION</code> logic</p>
 </header>
 <main>
 
@@ -68,8 +68,8 @@
     <!-- ===== sources ===== -->
     <g>
       <rect x="20" y="45" width="230" height="82" rx="10" fill="#e8eefc" stroke="#5b7bd5" stroke-width="2"/>
-      <text x="135" y="72" text-anchor="middle" font-size="14" font-weight="700">WPA_ASSET_DYN</text>
-      <text x="135" y="92" text-anchor="middle" font-size="12" fill="#374151">existing asset DT (held / traded)</text>
+      <text x="135" y="72" text-anchor="middle" font-size="14" font-weight="700">NPF_ASSET</text>
+      <text x="135" y="92" text-anchor="middle" font-size="12" fill="#374151">asset master (same as Oracle)</text>
       <text x="135" y="110" text-anchor="middle" font-size="12" fill="#374151">+ NPF_ASSET_CATG + NPF_DECODE</text>
     </g>
     <g>
@@ -115,9 +115,9 @@
       <text x="882" y="230" text-anchor="middle" font-size="12" font-weight="700" fill="#b45309">FINAL</text>
       <text x="882" y="252" text-anchor="middle" font-size="13.5" font-weight="700">WPA_CSTM_ASSET_SCHEMA_CATG_DY</text>
       <text x="882" y="278" text-anchor="middle" font-size="12" fill="#374151">every customer schema</text>
-      <text x="882" y="295" text-anchor="middle" font-size="12" fill="#374151">× every instrument</text>
+      <text x="882" y="295" text-anchor="middle" font-size="12" fill="#374151">× instruments that customer holds</text>
       <text x="882" y="320" text-anchor="middle" font-size="12" fill="#374151">custom → rule → standard</text>
-      <text x="882" y="342" text-anchor="middle" font-size="12" font-weight="600" fill="#b45309">~15.7M rows · 60 min lag</text>
+      <text x="882" y="342" text-anchor="middle" font-size="12" font-weight="600" fill="#b45309">customer holdings only · 60 min lag</text>
     </g>
 
     <!-- ===== arrows ===== -->
@@ -141,7 +141,7 @@
     <text x="700" y="345" text-anchor="middle" font-size="11" fill="#6b7280">custom row?</text>
     <!-- cust schema -> FINAL -->
     <path d="M250,486 C560,486 780,460 860,363" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
-    <text x="560" y="476" text-anchor="middle" font-size="11" fill="#6b7280">schemas × instruments</text>
+    <text x="560" y="476" text-anchor="middle" font-size="11" fill="#6b7280">schemas × customer holdings (DT4: latest WPA_AC_POSITION date)</text>
   </svg>
 </section>
 
@@ -152,7 +152,7 @@
     <div class="card c-dt">
       <div class="tag">DT1 · Oracle: npf_asst_typ_mgr (6-arg)</div>
       <h3>WPA_CAS_ASSET_STD_DYN</h3>
-      Instrument list from <code>WPA_ASSET_DYN</code>, joined to <code>NPF_ASSET_CATG</code> (WLT) for the
+      Instruments from <code>NPF_ASSET</code> (as in Oracle), joined to <code>NPF_ASSET_CATG</code> (WLT) for the
       standard super / sub category and <code>NPF_DECODE</code> for the country.
       Defaults <b>30 Other Assets</b> / <b>20 Miscellaneous</b> when unmapped.<br>
       <i>The only table that reads the asset source.</i>
@@ -170,10 +170,17 @@
       The active custom override (<code>END_DT IS NULL</code>) for each
       schema + instrument, if one exists.
     </div>
+    <div class="card c-dt">
+      <div class="tag">DT4 · Oracle: caller loop</div>
+      <h3>WPA_CAS_CUST_INSTR_DYN</h3>
+      Which instruments each customer holds: distinct <code>CUST_SK</code> + <code>INSTR_ID</code>
+      from <code>WPA_AC_POSITION</code> on the latest <code>CALENDAR_DATE</code>.
+      Positions only for now; transactions can be added later.
+    </div>
     <div class="card c-fin">
       <div class="tag">Final · Oracle: npf_asst_typ_mgr (11-arg)</div>
       <h3>WPA_CSTM_ASSET_SCHEMA_CATG_DY</h3>
-      One row per customer schema × instrument.
+      One row per customer schema × instrument that customer holds.
       Picks custom → rule → standard values and builds the
       <code>-C</code> / <code>-S</code> codes.
     </div>
@@ -241,7 +248,7 @@
   <h2>4. Current vs proposed</h2>
   <table>
     <tr><th style="width:22%"></th><th>Current: Streams + Task + Procedures</th><th>Proposed: Dynamic Tables</th></tr>
-    <tr><td class="n">Objects</td><td>7 streams, 1 task, 2 procedures (~1,400 lines), audit table</td><td class="good">4 dynamic tables (~300 lines SQL)</td></tr>
+    <tr><td class="n">Objects</td><td>7 streams, 1 task, 2 procedures (~1,400 lines), audit table</td><td class="good">5 dynamic tables (~400 lines SQL)</td></tr>
     <tr><td class="n">Change handling</td><td>Hand-coded per stream: impacted keys, temp tables, MERGE, deletes</td><td class="good">Automatic: Snowflake works out what changed</td></tr>
     <tr><td class="n">Refresh order</td><td>Controller procedure checks each stream</td><td class="good">Follows the dependency graph automatically</td></tr>
     <tr><td class="n">Logic</td><td>Snowflake port, with some differences from Oracle</td><td class="good">Matches Oracle exactly, validated by scenario</td></tr>
@@ -255,7 +262,7 @@
   <h2>5. Validation &amp; files</h2>
   <table>
     <tr><th style="width:38%">File</th><th>Purpose</th></tr>
-    <tr><td><code>CSTM Asset Schema Catg DT - Oracle Parity.sql</code></td><td>DDL for the 4 dynamic tables (DEV)</td></tr>
+    <tr><td><code>CSTM Asset Schema Catg DT - Oracle Parity.sql</code></td><td>DDL for the 5 dynamic tables (DEV)</td></tr>
     <tr><td><code>Validation - CSTM Asset Schema Catg DY.sql</code></td><td>Rebuilds the expected output independently and compares every schema × instrument × customer row, by Oracle scenario</td></tr>
     <tr><td><code>Oracle_Asset_Type_Manager_Logic.md</code></td><td>The Oracle logic explained, and how it maps to Snowflake</td></tr>
   </table>

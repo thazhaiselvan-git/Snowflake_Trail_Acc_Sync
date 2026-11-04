@@ -6,7 +6,9 @@
      - standard category from NPF_ASSET + NPF_ASSET_CATG + package defaults
      - country from NPF_ASSET.cntry_risk_dcde + NPF_DECODE('CNTRY')
      - rules evaluated PER INSTRUMENT (DT evaluates per desc combo)
-   Instrument universe = DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN (same as the DT).
+   Grain (same as the DT) = each NPF_CUST_CSTM_SCHEMA (cust_sk, schema) x the
+   instruments that cust_sk holds on the latest WPA_AC_POSITION calendar date
+   (instrument attributes read straight from NPF_ASSET, as the Oracle proc does).
 
    Sections
      0  Parameters
@@ -42,14 +44,16 @@ SET V_SCHEMA_ID = NULL;          -- e.g. SET V_SCHEMA_ID = 101;
    ============================================================================= */
 CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED AS
 WITH
-inst AS (                                     -- same instrument universe as the DT
-    SELECT DISTINCT instr_id
-    FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN
+hold AS (                                     -- customer holdings on the latest position date
+    SELECT DISTINCT p.cust_sk, p.instr_id
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    WHERE p.calendar_date = (SELECT MAX(calendar_date) FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION)
+      AND p.instr_id IS NOT NULL AND p.cust_sk IS NOT NULL
 ),
 ast AS (                                      -- NPF_ASSET attributes used by the proc
-    SELECT a.instr_id, a.iss_type, a.cntry_risk_dcde
+    SELECT a.instr_id, a.iss_type, a.cntry_risk_dcde        -- (only held instruments, for speed)
     FROM DEV_WPA_ASSET_DB.CORE.NPF_ASSET a
-    JOIN inst i ON i.instr_id = a.instr_id
+    WHERE a.instr_id IN (SELECT instr_id FROM hold)
 ),
 std AS (                                      -- 6-arg npf_asst_typ_mgr + country lookup
     SELECT
@@ -85,11 +89,16 @@ cs AS (                                       -- v_rec_cnt + cstm_asset_cursor
       AND ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
     QUALIFY ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id ORDER BY start_dt DESC) = 1
 ),
-need_rules AS (                               -- (schema, instr) pairs that go to RULE_EVALUATION
-    SELECT DISTINCT s.schema_id, t.instr_id, t.std_sup_desc, t.std_sub_desc, t.cntry_desc
+grid AS (                                     -- one row per npf_asst_typ_mgr call
+    SELECT s.cust_sk, s.schema_id, s.schema_desc, t.*
     FROM sch s
-    CROSS JOIN std t
-    WHERE NOT EXISTS (SELECT 1 FROM cs WHERE cs.schema_id = s.schema_id AND cs.instr_id = t.instr_id)
+    JOIN hold h ON h.cust_sk  = s.cust_sk
+    JOIN std  t ON t.instr_id = h.instr_id
+),
+need_rules AS (                               -- (schema, instr) pairs that go to RULE_EVALUATION
+    SELECT DISTINCT g.schema_id, g.instr_id, g.std_sup_desc, g.std_sub_desc, g.cntry_desc
+    FROM grid g
+    WHERE NOT EXISTS (SELECT 1 FROM cs WHERE cs.schema_id = g.schema_id AND cs.instr_id = g.instr_id)
 ),
 cond_eval AS (                                -- one row per (schema, instr, rule, condition)
     SELECT
@@ -187,8 +196,8 @@ SELECT
     IFF(t.cntry_desc IS NULL, 'Y', 'N')                                 AS no_cntry,
     IFF(t.iss_type   IS NULL, 'Y', 'N')                                 AS null_iss_type,
     NVL(ro.n_match, 0)                                                  AS n_rules_matched
-FROM sch s
-CROSS JOIN std t
+FROM grid t
+JOIN sch s         ON s.cust_sk = t.cust_sk AND s.schema_id = t.schema_id
 LEFT JOIN cs       ON cs.schema_id = s.schema_id AND cs.instr_id = t.instr_id
 LEFT JOIN rule_out ro ON ro.schema_id = s.schema_id AND ro.instr_id = t.instr_id;
 
@@ -197,14 +206,27 @@ LEFT JOIN rule_out ro ON ro.schema_id = s.schema_id AND ro.instr_id = t.instr_id
    2. Structural checks on the DT
    ============================================================================= */
 
--- 2.1 Row counts: DT vs expected vs grid (cust-schema rows x instruments)
+-- 2.1 Row counts: DT vs expected (cust-schema rows x that customer's holdings)
 SELECT
   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
     WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID))                     AS dt_rows,
-  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED)                  AS expected_rows,
-  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
-    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID))
-  * (SELECT COUNT(DISTINCT instr_id) FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN) AS grid_rows;
+  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED)                  AS expected_rows;
+
+-- 2.1b Same, per customer (spot the customers whose counts differ; expect 0 rows)
+SELECT COALESCE(d.schema_id, e.schema_id) AS schema_id,
+       COALESCE(d.cust_sk,   e.cust_sk)   AS cust_sk,
+       d.cnt AS dt_rows, e.cnt AS expected_rows
+FROM (SELECT schema_id, cust_sk, COUNT(*) cnt
+      FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+      WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+      GROUP BY 1,2) d
+FULL OUTER JOIN
+     (SELECT schema_id, cust_sk, COUNT(*) cnt
+      FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED GROUP BY 1,2) e
+  ON e.schema_id = d.schema_id AND e.cust_sk = d.cust_sk
+WHERE NOT EQUAL_NULL(d.cnt, e.cnt)
+ORDER BY 1,2
+LIMIT 100;
 
 -- 2.2 Duplicate keys in DT (expect 0)
 SELECT schema_id, instr_id, cust_sk, COUNT(*) AS cnt

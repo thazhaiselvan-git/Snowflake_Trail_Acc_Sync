@@ -4,12 +4,12 @@
    + npf_asst_typ_mgr (6-arg) + NPF_CUST_SCHEMA_RULE_EVALUATION_PKG.RULE_EVALUATION
    Reference: Oracle_Asset_Type_Manager_Logic.md
 
-   Grain : one row per NPF_CUST_CSTM_SCHEMA (CUST_SK, SCHEMA_ID) x asset instrument,
-           RPTG_TYPE = 'WLT'    (= one npf_asst_typ_mgr call)
+   Grain : one row per NPF_CUST_CSTM_SCHEMA (CUST_SK, SCHEMA_ID) x instrument
+           HELD by that CUST_SK on the latest position date, RPTG_TYPE = 'WLT'
+           (= one npf_asst_typ_mgr call per customer holding)
    Graph :
-     DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN  (existing asset DT: NPF_ASSET filtered to
-        │  read ONCE                        held / traded instruments)
-        │  + NPF_ASSET_CATG (WLT)  + NPF_DECODE (CNTRY)
+     DEV_WPA_ASSET_DB.CORE.NPF_ASSET (base table, same as Oracle proc)
+        │  read ONCE  + NPF_ASSET_CATG (WLT) + NPF_DECODE (CNTRY)
         ▼
      DT1 WPA_CAS_ASSET_STD_DYN    (6-arg proc + country)      1 row / instrument
         ├──────────────────────────────┐
@@ -18,9 +18,14 @@
         (RULE_EVALUATION)              │
         │   DT3 WPA_CAS_CSTM_ROW_DYN   │   ◀─ NPF_CSTM_SCHEMA
         │      (v_rec_cnt + cursor)    │
-        ▼      ▼                       ▼
-     FINAL WPA_CSTM_ASSET_SCHEMA_CATG_DY = NPF_CUST_CSTM_SCHEMA x DT1
-                                        ⟕ DT3 (custom row?) ⟕ DT2 (rule match?)
+        │      │   DT4 WPA_CAS_CUST_INSTR_DYN   ◀─ WPA_AC_POSITION (latest CALENDAR_DATE)
+        │      │      (cust_sk + instr held)    │
+        ▼      ▼                       ▼        ▼
+     FINAL WPA_CSTM_ASSET_SCHEMA_CATG_DY = NPF_CUST_CSTM_SCHEMA ⋈ DT4 (cust_sk) ⋈ DT1 (instr)
+                                         ⟕ DT3 (custom row?) ⟕ DT2 (rule match?)
+
+   Refresh modes: DT1 ADAPTIVE, DT2 INCREMENTAL, DT3 INCREMENTAL,
+                  DT4 ADAPTIVE (latest date moves daily -> bulk change), FINAL ADAPTIVE.
 
    Oracle parity rules applied:
      P1  Defaults from package spec: '30' / '20' / 'Other Assets' / 'Miscellaneous'
@@ -34,14 +39,14 @@
          (last, first, standard).
      P8  Custom row: standard codes, custom desc as-is (even NULL), -C/-S codes.
      P9  Several active custom rows: Oracle order undefined -> latest START_DT kept.
-     P10 p_cust_sk is not used by the proc -> same result for every CUST_SK of a schema.
+     P10 p_cust_sk is not used by the proc -> same values for every CUST_SK of a
+         schema; CUST_SK only decides WHICH instruments get a row (its holdings).
      P11 Rule result codes and country outputs are not used (as in Oracle).
 
-   Environment : DEV. NPF_* from DEV_WPA_ASSET_DB.CORE, asset DT
-                 DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN (DEV copy of
-                 PROD_WPA_ASSET_DB.CORE.WPA_ASSET_DYN), NPF_DECODE from
-                 DEV_WPA_COMMON_UTIL_DB.CORE, warehouse DEV_ADHOC_ANALYSIS.
-                 For UAT: replace DEV_ -> UAT_ and the warehouse name.
+   Environment : DEV. NPF_* (incl. NPF_ASSET) from DEV_WPA_ASSET_DB.CORE, NPF_DECODE from
+                 DEV_WPA_COMMON_UTIL_DB.CORE, positions from
+                 DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION, warehouse DEV_ADHOC_ANALYSIS.
+                 For UAT2: replace DEV_ -> UAT2_ and the warehouse name.
    NOT compiled here - DEV databases not visible from this session.
    ============================================================================= */
 
@@ -50,13 +55,14 @@
    0. Pre-reqs
    ----------------------------------------------------------------------------- */
 -- Change tracking on base tables read directly by the DTs
--- (DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN is a DT - no change tracking needed)
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_ASSET             SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG        SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE      SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA  SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA       SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR    SET CHANGE_TRACKING = TRUE;
 -- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND    SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION    SET CHANGE_TRACKING = TRUE;   -- skip if it is a DT
 
 -- Final DT is named WPA_CSTM_ASSET_SCHEMA_CATG_DY, so the existing proc-loaded
 -- table WPA_CSTM_ASSET_SCHEMA_CATG is left untouched (parallel run / comparison).
@@ -66,12 +72,13 @@
    DT1  WPA_CAS_ASSET_STD_DYN
    = npf_asst_typ_mgr 6-arg (standard category, defaults when no mapping)
      + country lookup of the 11-arg ELSE branch (country-of-risk description).
-   The ONLY reader of the asset DT. DT2 and FINAL both read this table, so the
+   The ONLY reader of NPF_ASSET. DT2 and FINAL both read this table, so the
    asset -> category/country mapping and the *_DESC_KEY join keys are defined
    once.
-   Source DT WPA_ASSET_DYN gives the instrument list (held / traded),
-   ISS_TYPE and CNTRY_RISK_DCDE only. It has no category columns, and its
-   CNTRY_RISK_DCDE_DESC defaults to 'Unknown' (Oracle returns NULL), so:
+   Reads NPF_ASSET directly (the table the Oracle proc reads) - all instruments;
+   which instruments get a row in the FINAL DT is decided by DT4 (holdings),
+   so no instrument pre-filter (e.g. WPA_ASSET_DYN) is needed here.
+   NPF_ASSET gives ISS_TYPE and CNTRY_RISK_DCDE; then:
      - category : LEFT JOIN NPF_ASSET_CATG (RPTG_TYPE='WLT'); defaults only when
                   no mapping row exists (Oracle FETCH semantics)
      - country  : LEFT JOIN NPF_DECODE (DCDE_TYPE='CNTRY'); NULL when not found
@@ -110,7 +117,7 @@ FROM (
         IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
         IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
         NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
-    FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN a
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_ASSET a
     LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
            ON ac.rptg_type = 'WLT'
           AND ac.iss_type  = a.iss_type
@@ -200,7 +207,7 @@ GROUP BY schema_id, sup_desc_key, sub_desc_key, cntry_desc_key;
    DT3  WPA_CAS_CSTM_ROW_DYN
    = v_rec_cnt > 0 check + cstm_asset_cursor (active row, END_DT IS NULL).
    Instrument-exists check of the cursor (join NPF_ASSET) is satisfied in the
-   final DT because the driver is DT1.
+   final DT because instruments come from DT1.
    QUALIFY is a safeguard only: no duplicate active rows exist today.
    ----------------------------------------------------------------------------- */
 create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN(
@@ -234,8 +241,52 @@ QUALIFY ROW_NUMBER() OVER (
 
 
 /* -----------------------------------------------------------------------------
+   DT4  WPA_CAS_CUST_INSTR_DYN
+   = which instruments each customer holds -> drives which rows the final DT has
+     (replaces "every schema x every instrument" with "every schema x the
+      customer's own holdings").
+   Holdings = positions on the LATEST CALENDAR_DATE in the whole position table
+   (same as testing with CALENDAR_DATE = max date). A customer with no position
+   on that date gets no rows.
+   Latest date is a JOIN to MAX(calendar_date), not a WHERE subquery, so the DT
+   stays incrementally refreshable; when the date rolls forward the whole set
+   changes once a day, which ADAPTIVE handles with a single reinitialization.
+   Future: to add transactions, UNION ALL the customer's traded instruments into
+   the src CTE (keep the GROUP BY on top for de-duplication).
+   Kept as its own DT (not inlined into FINAL): positions have several rows per
+   (cust_sk, instr_id) on a date (DEV check: 2,015,796 rows vs 730,657 distinct
+   pairs), so a de-duplicating GROUP BY is needed. Here it is the outermost
+   operation (incrementally maintainable); nested inside FINAL it would be
+   recomputed from scratch on every refresh.
+   ----------------------------------------------------------------------------- */
+create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN(
+  CUST_SK,
+  INSTR_ID
+) target_lag = DOWNSTREAM refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+ as
+WITH latest AS (
+    SELECT MAX(calendar_date) AS max_calendar_date
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION
+),
+src AS (
+    SELECT p.cust_sk, p.instr_id
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    JOIN latest l
+      ON p.calendar_date = l.max_calendar_date
+    WHERE p.instr_id IS NOT NULL
+      AND p.cust_sk  IS NOT NULL
+    -- UNION ALL
+    -- SELECT t.cust_sk, t.instr_id FROM DEV_WPA_TRANSACTION_DB.CORE.<transaction table> t WHERE ...
+)
+SELECT cust_sk, instr_id
+FROM src
+GROUP BY cust_sk, instr_id;
+
+
+/* -----------------------------------------------------------------------------
    FINAL  WPA_CSTM_ASSET_SCHEMA_CATG_DY
-   = npf_asst_typ_mgr 11-arg, for every (cust_sk, schema) x instrument.
+   = npf_asst_typ_mgr 11-arg, for every (cust_sk, schema) x instrument the
+     customer holds (DT4).
      Path 1 (IF v_rec_cnt <> 0): custom row
      Path 2 (ELSE)             : RULE_EVALUATION result / standard
    OUT param mapping:
@@ -243,6 +294,8 @@ QUALIFY ROW_NUMBER() OVER (
      v_ast_supcatg_desc_a  -> SUPCATG_DESC      v_ast_subcatg_desc_a  -> SUBCATG_DESC
      v_cstm_supcatg_code_a -> CSTM_SUPCATG_CODE v_cstm_subcatg_code_a -> CSTM_SUBCATG_CODE
    CSTM_*_DESC repeat SUPCATG_DESC / SUBCATG_DESC (same as existing table).
+   Held instruments missing from NPF_ASSET get no row - same as Oracle, where
+   the proc needs the instrument in NPF_ASSET.
    ----------------------------------------------------------------------------- */
 create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY(
   SCHEMA_ID,
@@ -282,7 +335,10 @@ WITH calls AS (
         cr.npf_subcatg_code,
         rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
     FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
-    CROSS JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a
+    JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci        -- customer's holdings
+      ON ci.cust_sk = s.cust_sk
+    JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a
+      ON a.instr_id = ci.instr_id
     LEFT JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN cr
            ON cr.schema_id = s.schema_id
           AND cr.instr_id  = a.instr_id
@@ -333,14 +389,22 @@ FROM out;
 /* =============================================================================
    Post-create checks
    ============================================================================= */
--- SHOW DYNAMIC TABLES LIKE 'WPA_CAS%' IN SCHEMA DEV_WPA_ASSET_DB.CORE;            -- refresh_mode / reason
--- SHOW DYNAMIC TABLES LIKE 'WPA_CSTM_ASSET_SCHEMA_CATG_DY' IN SCHEMA DEV_WPA_ASSET_DB.CORE;
+-- SHOW DYNAMIC TABLES LIKE 'WPA_C%' IN SCHEMA DEV_WPA_ASSET_DB.CORE;             -- refresh_mode / reason
 -- ALTER DYNAMIC TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY REFRESH;   -- first load
 
--- Expected row count = cust-schema rows x assets
--- SELECT (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA)
---      * (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN)    AS expected,
---        (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY) AS actual;
+-- Expected rows for one customer + schema = instruments that customer holds on the
+-- latest date AND that exist in DT1 (e.g. schema 10190 / cust 1003 -> 5028)
+-- SET V_SCHEMA = 10190;  SET V_CUST = 1003;
+-- SELECT
+--   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci
+--     JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a ON a.instr_id = ci.instr_id
+--    WHERE ci.cust_sk = $V_CUST)                                                  AS expected,
+--   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+--    WHERE schema_id = $V_SCHEMA AND cust_sk = $V_CUST)                          AS actual;
+
+-- Held instruments missing from the asset DT (would get no row) - expect 0 or explainable
+-- SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci
+-- WHERE NOT EXISTS (SELECT 1 FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a WHERE a.instr_id = ci.instr_id);
 
 -- Path split
 -- SELECT IFF(cstm_subcatg_code LIKE '%-%-S', 'PATH 2 rule/std', 'PATH 1 custom') AS path, COUNT(*)

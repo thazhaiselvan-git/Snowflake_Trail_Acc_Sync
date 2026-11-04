@@ -101,11 +101,11 @@ CREATE OR REPLACE GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO
   ORIGIN = 'https://github.com/thazhaiselvan-git/dbt_deployment_demo.git';
 
 ALTER GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO FETCH;
-LS @RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main;   -- should list dbt_project.yml
+LS @RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project;   -- should list dbt_project.yml
 
 -- First deploy (later deploys come from GitHub Actions via ALTER ... DEPLOY FROM)
 CREATE DBT PROJECT IF NOT EXISTS RETAIL_DBT.PROD.RETAIL_PROJECT
-  FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main'
+  FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project'
   DEFAULT_TARGET = 'prod';
 
 EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
