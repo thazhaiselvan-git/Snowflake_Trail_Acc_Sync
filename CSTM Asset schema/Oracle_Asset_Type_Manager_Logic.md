@@ -253,15 +253,15 @@ Each Oracle unit becomes one declarative layer. The final build is **5 dynamic t
 
 | Oracle | Snowflake layer |
 |---|---|
-| Unit A (+ country lookup in B) | **DT1 `WPA_CAS_ASSET_STD_DYN`**: `NPF_ASSET` read directly (the table the Oracle procedure reads; no `WPA_ASSET_DYN` pre-filter needed, since DT4 decides which instruments get rows) ⟕ `NPF_ASSET_CATG` (WLT, defaults `30`/`20` only when no mapping) ⟕ `NPF_DECODE` ('CNTRY', NULL when missing). Adds `NULLIF` and the 3 `*_DESC_KEY` join keys. One row per instrument. |
+| Unit A (+ country lookup in B) | **DT1 `WPA_CAS_ASSET_STD_DYN`**: the existing asset DT `WPA_ASSET_DYN` (`NPF_ASSET` pre-filtered to instruments in positions/transactions, so only relevant assets are carried). Only its raw `NPF_ASSET` columns `ISS_TYPE` and `CNTRY_RISK_DCDE` are used; its own category/country descriptions are not ⟕ `NPF_ASSET_CATG` (WLT, defaults `30`/`20` only when no mapping) ⟕ `NPF_DECODE` ('CNTRY', NULL when missing). Adds `NULLIF` and the 3 `*_DESC_KEY` join keys. One row per instrument. |
 | Unit C | **DT2 `WPA_CAS_RULE_PICK_DYN`**: DT1 → distinct (sup_desc, sub_desc, cntry_desc) → rule evaluation → first and last matching rule per schema |
 | `v_rec_cnt` + `cstm_asset_cursor` | **DT3 `WPA_CAS_CSTM_ROW_DYN`**: one active `NPF_CSTM_SCHEMA` row per (schema, instr, 'WLT') |
-| Caller loop (which instruments per customer) | **DT4 `WPA_CAS_CUST_INSTR_DYN`**: distinct (`CUST_SK`, `INSTR_ID`) from `WPA_AC_POSITION` on the latest `CALENDAR_DATE`. Positions only for now; transactions can be added later. |
+| Caller loop (which instruments per customer) | **DT4 `WPA_CAS_CUST_INSTR_DYN`**: distinct (`CUST_SK`, `INSTR_ID`) from `WPA_AC_POSITION` (any `CALENDAR_DATE`) `UNION ALL` `WPA_TRANSACTION` (all), de-duplicated by an outer `GROUP BY`. A latest-date-only filter was ruled out because it misses instruments. `CUST_SK` is kept here rather than in DT1, so DT1 stays one row per instrument and daily position/transaction churn doesn't cascade into DT1 → DT2. |
 | Unit B IF/ELSE | **Final `WPA_CSTM_ASSET_SCHEMA_CATG_DY`**: `NPF_CUST_CSTM_SCHEMA` ⋈ DT4 (on `CUST_SK`) ⋈ DT1 (on `INSTR_ID`), LEFT JOIN DT3 (Path 1) and DT2 (Path 2) |
 
 ```
-DEV_WPA_ASSET_DB.CORE.NPF_ASSET + NPF_ASSET_CATG + NPF_DECODE
-   │  NPF_ASSET read once
+DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN (existing DT) + NPF_ASSET_CATG + NPF_DECODE
+   │  asset data read once
    ▼
 DT1 WPA_CAS_ASSET_STD_DYN ───────────────────────┐
    │                                             │
@@ -270,16 +270,16 @@ DT2 WPA_CAS_RULE_PICK_DYN ◀─ NPF_CSTM_RULE_MSTR / NPF_CSTM_RULE_COND
    │                                             │
    │    DT3 WPA_CAS_CSTM_ROW_DYN ◀─ NPF_CSTM_SCHEMA
    │       │                                     │
-   │       │   DT4 WPA_CAS_CUST_INSTR_DYN ◀─ WPA_AC_POSITION (latest date)
+   │       │   DT4 WPA_CAS_CUST_INSTR_DYN ◀─ WPA_AC_POSITION + WPA_TRANSACTION (all dates)
    │       │      │                              │
    ▼       ▼      ▼                              ▼
 WPA_CSTM_ASSET_SCHEMA_CATG_DY = NPF_CUST_CSTM_SCHEMA ⋈ DT4 (cust_sk) ⋈ DT1 (instr)
                                ⟕ DT3 (custom row?)  ⟕ DT2 (rule match?)
 ```
 
-**Grain:** one row per customer schema × the instruments **that customer holds** on the latest position date (e.g. schema 10190 / cust 1003 → 5,028 rows instead of 417,031). The values in each row are unchanged: `p_cust_sk` still doesn't affect them; it only decides which instruments get a row.
+**Grain:** one row per customer schema × the instruments **that customer ever held or transacted** (e.g. cust 104265: about 6,104+ instruments instead of 399,775 in the earlier unfiltered version). The values in each row are unchanged: `p_cust_sk` still doesn't affect them; it only decides which instruments get a row.
 
-**Refresh modes:** DT1 `ADAPTIVE`, DT2 `INCREMENTAL`, DT3 `INCREMENTAL`, DT4 `ADAPTIVE` (the latest date moves daily, so the whole set changes at once), final `ADAPTIVE`.
+**Refresh modes:** DT1 `ADAPTIVE`, DT2 `INCREMENTAL`, DT3 `INCREMENTAL`, DT4 `ADAPTIVE` (append-only pairs, so refreshes stay incremental), final `ADAPTIVE`.
 
 DT1 is the single place where the asset → category/country mapping and the join keys are defined, and both DT2 and the final DT read it. Full DDL: `CSTM Asset Schema Catg DT - Oracle Parity.sql`.
 
@@ -321,7 +321,7 @@ This logic is implemented in `CSTM Asset Schema Catg DT - Oracle Parity.sql` wit
 
 1. ~~Package constants~~ **Resolved:** `'30'` / `'20'` / `'Other Assets'` / `'Miscellaneous'`, country defaults NULL. The package's 11-argument procedure is identical to `Asset Type Manager - Oracle.sql`.
    The package also has `get_cstm_cntry_risk_desc` (custom country of risk from `NPF_CSTM_SCHEMA`), but `npf_asst_typ_mgr` doesn't call it, so it isn't part of this output.
-2. **Caller procedure / grain:** *Decided:* one row per customer schema × the instruments that customer holds on the latest `WPA_AC_POSITION` date (positions only for now; transactions may be added later). Instrument attributes come from `NPF_ASSET` directly. NULL `ISS_TYPE` instruments are included and get the default category, as in Oracle.
+2. **Caller procedure / grain:** *Decided:* one row per customer schema × the instruments that customer ever held (`WPA_AC_POSITION`, any date) or transacted (`WPA_TRANSACTION`). Instrument attributes come from `WPA_ASSET_DYN` (raw `NPF_ASSET` columns). NULL `ISS_TYPE` instruments are included and get the default category, as in Oracle.
    Still open: confirm against the actual Oracle caller code once it is found.
 3. ~~Zero-condition active rules~~ **Resolved (data check):** no active rule without conditions exists, so Oracle and Snowflake behave the same today. The DT keeps the Oracle behaviour (such a rule matches every asset).
 4. ~~Duplicate active custom rows~~ **Resolved (data check):** 0 (schema, instr) pairs with more than one active `WLT` row in `UAT_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA`. The `QUALIFY ... ORDER BY start_dt DESC` in DT3 is kept only as a safeguard, so the output matches Oracle today.
@@ -347,7 +347,7 @@ The other target columns (`SCHEMA_ID`, `CUST_SK`, `INSTR_ID`, `RPTG_TYPE`, `ISS_
 
 ### 8.1 Oracle-exact Snowflake SELECT (one statement = all calls)
 
-This early sketch drives from **every `NPF_CUST_CSTM_SCHEMA` (cust_sk, schema) × every `NPF_ASSET` instrument**. The final DDL instead drives from each customer's holdings on the latest position date (DT4, see §6); the per-row logic is identical.
+This early sketch drives from **every `NPF_CUST_CSTM_SCHEMA` (cust_sk, schema) × every `NPF_ASSET` instrument**. The final DDL instead drives from each customer's positions and transactions (DT4, see §6); the per-row logic is identical.
 
 ```sql
 WITH

@@ -68,8 +68,8 @@
     <!-- ===== sources ===== -->
     <g>
       <rect x="20" y="45" width="230" height="82" rx="10" fill="#e8eefc" stroke="#5b7bd5" stroke-width="2"/>
-      <text x="135" y="72" text-anchor="middle" font-size="14" font-weight="700">NPF_ASSET</text>
-      <text x="135" y="92" text-anchor="middle" font-size="12" fill="#374151">asset master (same as Oracle)</text>
+      <text x="135" y="72" text-anchor="middle" font-size="14" font-weight="700">WPA_ASSET_DYN</text>
+      <text x="135" y="92" text-anchor="middle" font-size="12" fill="#374151">existing asset DT (held/traded only)</text>
       <text x="135" y="110" text-anchor="middle" font-size="12" fill="#374151">+ NPF_ASSET_CATG + NPF_DECODE</text>
     </g>
     <g>
@@ -141,7 +141,7 @@
     <text x="700" y="345" text-anchor="middle" font-size="11" fill="#6b7280">custom row?</text>
     <!-- cust schema -> FINAL -->
     <path d="M250,486 C560,486 780,460 860,363" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
-    <text x="560" y="476" text-anchor="middle" font-size="11" fill="#6b7280">schemas × customer holdings (DT4: latest WPA_AC_POSITION date)</text>
+    <text x="560" y="476" text-anchor="middle" font-size="11" fill="#6b7280">schemas × customer instruments (DT4: positions + transactions, all dates)</text>
   </svg>
 </section>
 
@@ -152,7 +152,7 @@
     <div class="card c-dt">
       <div class="tag">DT1 · Oracle: npf_asst_typ_mgr (6-arg)</div>
       <h3>WPA_CAS_ASSET_STD_DYN</h3>
-      Instruments from <code>NPF_ASSET</code> (as in Oracle), joined to <code>NPF_ASSET_CATG</code> (WLT) for the
+      Instruments from the existing <code>WPA_ASSET_DYN</code> (only assets in positions/transactions; raw <code>ISS_TYPE</code> and <code>CNTRY_RISK_DCDE</code> used), joined to <code>NPF_ASSET_CATG</code> (WLT) for the
       standard super / sub category and <code>NPF_DECODE</code> for the country.
       Defaults <b>30 Other Assets</b> / <b>20 Miscellaneous</b> when unmapped.<br>
       <i>The only table that reads the asset source.</i>
@@ -173,14 +173,14 @@
     <div class="card c-dt">
       <div class="tag">DT4 · Oracle: caller loop</div>
       <h3>WPA_CAS_CUST_INSTR_DYN</h3>
-      Which instruments each customer holds: distinct <code>CUST_SK</code> + <code>INSTR_ID</code>
-      from <code>WPA_AC_POSITION</code> on the latest <code>CALENDAR_DATE</code>.
-      Positions only for now; transactions can be added later.
+      Which instruments each customer has: distinct <code>CUST_SK</code> + <code>INSTR_ID</code>
+      from <code>WPA_AC_POSITION</code> (any date) and <code>WPA_TRANSACTION</code>.
+      Kept separate so DT1 stays one row per instrument.
     </div>
     <div class="card c-fin">
       <div class="tag">Final · Oracle: npf_asst_typ_mgr (11-arg)</div>
       <h3>WPA_CSTM_ASSET_SCHEMA_CATG_DY</h3>
-      One row per customer schema × instrument that customer holds.
+      One row per customer schema × instrument that customer held or transacted.
       Picks custom → rule → standard values and builds the
       <code>-C</code> / <code>-S</code> codes.
     </div>
