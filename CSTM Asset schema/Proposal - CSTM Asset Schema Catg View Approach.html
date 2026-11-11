@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="snowflake-source" content="cortex-agent-authored" />
+<title>Proposal: WPA_CSTM_ASSET_SCHEMA_CATG on Snowflake (View + Task approach)</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-11",
+  "intent": "Design proposal for leads/peers: replace Oracle npf_asst_typ_mgr + RULE_EVALUATION load of WPA_CSTM_ASSET_SCHEMA_CATG with a Snowflake view + MERGE procedure + 2 serverless tasks (3-min schedule and rule-table stream trigger).",
+  "dataSources": [
+    { "type": "file", "path": "CSTM Asset schema/CSTM Asset Schema Catg - View + Task.sql" },
+    { "type": "file", "path": "CSTM Asset schema/View Based Approach Liquibase Deployment.sql" },
+    { "type": "file", "path": "CSTM Asset schema/CSTM Asset Schema Catg DT - Oracle Parity.sql" },
+    { "type": "file", "path": "CSTM Asset schema/Validation - CSTM Asset Schema Catg DY.sql" }
+  ],
+  "sections": [
+    { "id": "summary", "title": "Summary", "producerNotes": "Written from the design discussion; no live queries." },
+    { "id": "background", "title": "Background & problem" },
+    { "id": "options", "title": "Options considered" },
+    { "id": "architecture", "title": "Proposed architecture", "producerNotes": "Inline SVG diagram; object names from the View + Task SQL file." },
+    { "id": "logic", "title": "Business logic (view)" },
+    { "id": "load", "title": "Load mechanism" },
+    { "id": "scenarios", "title": "Change & failure scenarios" },
+    { "id": "parity", "title": "Oracle parity & validation" },
+    { "id": "deployment", "title": "Deployment" },
+    { "id": "risks", "title": "Risks, open points & decisions needed" },
+    { "id": "next-steps", "title": "Next steps" }
+  ]
+}
+</script>
+<style>
+  :root { color-scheme: light dark;
+    --fg: light-dark(#1f2937, #e5e7eb); --muted: light-dark(#6b7280, #9ca3af);
+    --head: light-dark(#0f172a, #f1f5f9); --line: light-dark(#d1d5db, #374151);
+    --card: light-dark(#f8fafc, #111827); --accent: light-dark(#1d4ed8, #60a5fa);
+    --src: light-dark(#e8eefc, #1e293b); --srcb: light-dark(#5b7bd5, #7c9cf0);
+    --obj: light-dark(#e6f6ea, #12301c); --objb: light-dark(#3c9a5a, #5fcf86);
+    --tsk: light-dark(#fff1d9, #3a2a0e); --tskb: light-dark(#d88a00, #f0b44c);
+    --ok: light-dark(#047857, #34d399); --warn: light-dark(#b45309, #fbbf24); }
+  body { font-family: -apple-system, system-ui, "Segoe UI", sans-serif; color: var(--fg);
+    max-width: 1000px; width: 100%; box-sizing: border-box; margin: 0 auto;
+    padding: clamp(16px, 4vw, 32px); line-height: 1.5; }
+  h1, h2, h3 { color: var(--head); line-height: 1.25; }
+  h1 { font-size: clamp(1.5rem, 3.5vw, 2rem); margin-bottom: 4px; }
+  h2 { margin-top: 40px; padding-bottom: 6px; border-bottom: 2px solid var(--line); }
+  h3 { margin-top: 24px; }
+  .sub { color: var(--muted); margin-top: 0; }
+  a { color: var(--accent); }
+  img, svg { max-width: 100%; height: auto; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
+    background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    overflow-x: auto; font-size: .85em; }
+  pre code { border: 0; padding: 0; background: none; }
+  .table-wrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .93em; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--card); font-weight: 600; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card .k { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+  .card .l { color: var(--muted); font-size: .9em; }
+  .callout { border-left: 4px solid var(--accent); background: var(--card); padding: 10px 14px; border-radius: 6px; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.ok { border-left-color: var(--ok); }
+  .pill { display: inline-block; font-size: .78em; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--card); }
+  .pill.rec { color: var(--ok); border-color: var(--ok); }
+  .diagram { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; overflow-x: auto; }
+  .diagram svg { min-width: 640px; display: block; margin: 0 auto; }
+  .diagram text { fill: var(--fg); font-family: -apple-system, system-ui, sans-serif; }
+  .diagram .muted { fill: var(--muted); }
+  .src { fill: var(--src); stroke: var(--srcb); stroke-width: 2; }
+  .obj { fill: var(--obj); stroke: var(--objb); stroke-width: 2; }
+  .tsk { fill: var(--tsk); stroke: var(--tskb); stroke-width: 2; }
+  .arr { stroke: var(--muted); stroke-width: 2; fill: none; }
+  .arr.dash { stroke-dasharray: 6 4; }
+  nav.toc { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; margin: 20px 0; }
+  nav.toc ol { margin: 6px 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+  @media (max-width: 600px) { nav.toc ol { columns: 1; } }
+  footer { margin-top: 48px; color: var(--muted); font-size: .85em; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Proposal: WPA_CSTM_ASSET_SCHEMA_CATG on Snowflake</h1>
+<p class="sub">View + MERGE procedure + serverless tasks (3-min schedule + rule-change trigger) · Prepared for leads &amp; peer discussion · November 2026</p>
+
+<nav class="toc"><strong>Contents</strong>
+<ol>
+  <li><a href="#summary">Summary</a></li>
+  <li><a href="#background">Background &amp; problem</a></li>
+  <li><a href="#options">Options considered</a></li>
+  <li><a href="#architecture">Proposed architecture</a></li>
+  <li><a href="#logic">Business logic (view)</a></li>
+  <li><a href="#load">Load mechanism</a></li>
+  <li><a href="#scenarios">Change &amp; failure scenarios</a></li>
+  <li><a href="#parity">Oracle parity &amp; validation</a></li>
+  <li><a href="#deployment">Deployment</a></li>
+  <li><a href="#risks">Risks &amp; decisions needed</a></li>
+  <li><a href="#next-steps">Next steps</a></li>
+</ol></nav>
+
+<!-- ============================ 1 ============================ -->
+<h2 id="summary">1. Summary</h2>
+<p>We propose to rebuild the custom asset schema category table, which is today loaded by the Oracle
+<code>npf_common_pkg.npf_asst_typ_mgr</code> + <code>RULE_EVALUATION</code> logic, as:</p>
+<ul>
+  <li><strong>One view</strong> <code>WPA_CSTM_ASSET_SCHEMA_CATG_VW</code> holding the complete Oracle logic, so the logic lives in one place.</li>
+  <li><strong>One target table</strong> <code>WPA_CSTM_ASSET_SCHEMA_CATG_TBL</code> that consumers read.</li>
+  <li><strong>One load procedure</strong> <code>WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP</code> doing a delta <strong>MERGE + DELETE</strong>.</li>
+  <li><strong>Two serverless tasks</strong>: a regular refresh <strong>every 3 minutes</strong>, and an <strong>immediate</strong> refresh when a user changes a rule table, detected through streams.</li>
+</ul>
+<div class="cards">
+  <div class="card"><div class="k">1:1</div><div class="l">Oracle parity: all 7 Oracle branches reproduced; 25 hand-picked cases matched Oracle output</div></div>
+  <div class="card"><div class="k">≤ 3 min</div><div class="l">Normal data latency (position / transaction / asset changes)</div></div>
+  <div class="card"><div class="k">~1 min</div><div class="l">Latency after a rule table change (triggered task)</div></div>
+  <div class="card"><div class="k">Delta</div><div class="l">Only changed rows are written; <code>LOAD_TS</code> = when the row last changed</div></div>
+</div>
+<div class="callout ok"><strong>Ask:</strong> agree on the approach, the grain (§5) and the open decisions in §10, then proceed to UAT2 deployment through Liquibase.</div>
+
+<!-- ============================ 2 ============================ -->
+<h2 id="background">2. Background &amp; problem</h2>
+<ul>
+  <li>The target table holds, for each customer's custom schema, the <strong>super / sub category code and description</strong> of every asset the customer holds or has traded, using reporting type <code>WLT</code>.</li>
+  <li>In Oracle the procedure is called <strong>once per customer schema × instrument</strong>. Each call either:
+    <ul>
+      <li>applies the custom override row (<code>NPF_CSTM_SCHEMA</code>), producing <code>-C</code>/<code>-S</code> codes, or</li>
+      <li>evaluates the schema's rules (<code>NPF_CSTM_RULE_MSTR</code> / <code>_COND</code>) against the standard category and the country, falling back to the standard values.</li>
+    </ul>
+  </li>
+  <li>The current Snowflake load (stored procedure plus streams) is row-by-row in spirit, hard to review, and earlier versions produced <strong>every instrument for every customer</strong>, for example 399,775 instruments for one customer who holds about 6,104.</li>
+  <li>Goals: an <strong>Oracle-exact</strong> result, a <strong>simple and reviewable</strong> design, <strong>each large source read once</strong>, near-real-time freshness, and <strong>immediate</strong> reflection of rule changes.</li>
+</ul>
+
+<!-- ============================ 3 ============================ -->
+<h2 id="options">3. Options considered</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Criterion</th><th>A. Dynamic tables (5 DTs)</th><th>B. View + MERGE task <span class="pill rec">Recommended</span></th></tr></thead>
+<tbody>
+<tr><td>Logic location</td><td>Split across 5 objects</td><td>One view (one CTE per step)</td></tr>
+<tr><td>Freshness control</td><td>Target lag (automatic)</td><td>Explicit: 3-min schedule plus immediate trigger on rule changes</td></tr>
+<tr><td>Dependency on <code>WPA_ASSET_DYN</code></td><td>Yes. It changes often, runs long, and is moving to a stream approach</td><td>No. Reads <code>NPF_ASSET</code> directly, limited to in-use instruments</td></tr>
+<tr><td>Scan of the huge position / transaction tables</td><td>Continuous refreshes, all customers</td><td>Once per run, and only for customers that have a custom schema</td></tr>
+<tr><td>Refresh-mode risk</td><td>An incremental table can't sit on one that falls back to FULL; mode chosen by Snowflake</td><td>Not applicable</td></tr>
+<tr><td>Write pattern</td><td>Managed by Snowflake</td><td>Delta MERGE: only changed rows, with a real <code>LOAD_TS</code></td></tr>
+<tr><td>Rule change reflected</td><td>At next lag</td><td>About 1 minute (stream-triggered task)</td></tr>
+<tr><td>Operability</td><td><code>SHOW DYNAMIC TABLES</code>, refresh history</td><td>Task history, procedure return message, a failure suspends the task after 3 attempts</td></tr>
+<tr><td>Status</td><td>Built and validated; kept as a reference, in sync</td><td>Built; Liquibase script ready (UAT2)</td></tr>
+</tbody></table></div>
+<p>The review team agreed on <strong>Option B</strong>. The dynamic-table version is kept in sync because its logic is identical, and it served as the validated reference.</p>
+
+<!-- ============================ 4 ============================ -->
+<h2 id="architecture">4. Proposed architecture</h2>
+<div class="diagram">
+<svg viewBox="0 0 960 470" role="img" aria-label="Architecture: sources feed a view; a procedure merges the view into the target table; two tasks call the procedure">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker></defs>
+  <text x="120" y="22" text-anchor="middle" font-size="13" font-weight="700" class="muted">SOURCES</text>
+  <text x="470" y="22" text-anchor="middle" font-size="13" font-weight="700" class="muted">LOGIC &amp; LOAD</text>
+  <text x="830" y="22" text-anchor="middle" font-size="13" font-weight="700" class="muted">TARGET</text>
+
+  <rect class="src" x="10" y="40"  width="220" height="54" rx="8"/><text x="120" y="63" text-anchor="middle" font-size="13" font-weight="700">WPA_AC_POSITION</text><text x="120" y="82" text-anchor="middle" font-size="11">+ WPA_TRANSACTION</text>
+  <rect class="src" x="10" y="106" width="220" height="54" rx="8"/><text x="120" y="129" text-anchor="middle" font-size="13" font-weight="700">NPF_ASSET</text><text x="120" y="148" text-anchor="middle" font-size="11">+ NPF_ASSET_CATG + NPF_DECODE</text>
+  <rect class="src" x="10" y="172" width="220" height="54" rx="8"/><text x="120" y="195" text-anchor="middle" font-size="13" font-weight="700">NPF_CSTM_SCHEMA</text><text x="120" y="214" text-anchor="middle" font-size="11">custom overrides</text>
+  <rect class="src" x="10" y="238" width="220" height="54" rx="8"/><text x="120" y="261" text-anchor="middle" font-size="13" font-weight="700">NPF_CUST_CSTM_SCHEMA</text><text x="120" y="280" text-anchor="middle" font-size="11">customer ↔ schema</text>
+  <rect class="src" x="10" y="304" width="220" height="54" rx="8"/><text x="120" y="327" text-anchor="middle" font-size="13" font-weight="700">NPF_CSTM_RULE_MSTR</text><text x="120" y="346" text-anchor="middle" font-size="11">+ NPF_CSTM_RULE_COND</text>
+
+  <rect class="obj" x="340" y="110" width="260" height="96" rx="10"/>
+  <text x="470" y="138" text-anchor="middle" font-size="12" font-weight="700" class="muted">VIEW</text>
+  <text x="470" y="160" text-anchor="middle" font-size="13.5" font-weight="700">WPA_CSTM_ASSET_SCHEMA_CATG_VW</text>
+  <text x="470" y="182" text-anchor="middle" font-size="11">all Oracle logic · 1 CTE per step</text>
+
+  <rect class="obj" x="340" y="240" width="260" height="70" rx="10"/>
+  <text x="470" y="266" text-anchor="middle" font-size="12" font-weight="700" class="muted">PROCEDURE</text>
+  <text x="470" y="288" text-anchor="middle" font-size="13" font-weight="700">..._CATG_LOAD_SP()</text>
+
+  <rect class="tsk" x="300" y="370" width="160" height="62" rx="10"/><text x="380" y="395" text-anchor="middle" font-size="12.5" font-weight="700">..._CATG_TSK</text><text x="380" y="415" text-anchor="middle" font-size="11">every 3 min</text>
+  <rect class="tsk" x="480" y="370" width="170" height="62" rx="10"/><text x="565" y="395" text-anchor="middle" font-size="12.5" font-weight="700">..._CATG_RULE_TSK</text><text x="565" y="415" text-anchor="middle" font-size="11">on rule change</text>
+
+  <rect class="src" x="690" y="370" width="150" height="62" rx="8"/><text x="765" y="395" text-anchor="middle" font-size="11.5" font-weight="700">2 STREAMS</text><text x="765" y="413" text-anchor="middle" font-size="10.5">RULE_MSTR / RULE_COND</text>
+
+  <rect class="tsk" x="720" y="190" width="230" height="110" rx="12"/>
+  <text x="835" y="218" text-anchor="middle" font-size="12" font-weight="700" class="muted">TABLE</text>
+  <text x="835" y="240" text-anchor="middle" font-size="12.5" font-weight="700">..._SCHEMA_CATG_TBL</text>
+  <text x="835" y="262" text-anchor="middle" font-size="11">key: SCHEMA_ID, CUST_SK,</text>
+  <text x="835" y="278" text-anchor="middle" font-size="11">INSTR_ID, ISS_TYPE</text>
+
+  <path class="arr" d="M230,67 C290,67 300,140 337,145" marker-end="url(#a)"/>
+  <path class="arr" d="M230,133 L337,150" marker-end="url(#a)"/>
+  <path class="arr" d="M230,199 L337,162" marker-end="url(#a)"/>
+  <path class="arr" d="M230,265 C290,265 300,180 337,172" marker-end="url(#a)"/>
+  <path class="arr" d="M230,331 C300,331 300,190 337,190" marker-end="url(#a)"/>
+  <path class="arr" d="M470,240 L470,209" marker-end="url(#a)"/><text x="480" y="228" font-size="10.5" class="muted">reads once</text>
+  <path class="arr" d="M600,275 L717,250" marker-end="url(#a)"/><text x="612" y="252" font-size="10.5" class="muted">MERGE + DELETE</text>
+  <path class="arr" d="M380,370 L430,313" marker-end="url(#a)"/>
+  <path class="arr" d="M565,370 L510,313" marker-end="url(#a)"/>
+  <path class="arr dash" d="M690,401 L653,401" marker-end="url(#a)"/><text x="671" y="392" font-size="10" text-anchor="middle" class="muted">WHEN</text>
+  <path class="arr dash" d="M120,358 C120,455 765,460 765,435" marker-end="url(#a)"/><text x="440" y="458" font-size="10.5" text-anchor="middle" class="muted">change tracking</text>
+</svg>
+</div>
+
+<h3>Object inventory</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Object</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>WPA_CSTM_ASSET_SCHEMA_CATG_VW</code></td><td>View</td><td>All business logic: npf_asst_typ_mgr (6-arg and 11-arg) plus RULE_EVALUATION</td></tr>
+<tr><td><code>WPA_CSTM_ASSET_SCHEMA_CATG_TBL</code></td><td>Table</td><td>Physical result read by consumers, with <code>LOAD_TS</code></td></tr>
+<tr><td><code>WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP</code></td><td>Procedure (SQL)</td><td>Consume the rule streams → stage the view → MERGE → DELETE, in one transaction</td></tr>
+<tr><td><code>WPA_CSTM_ASSET_SCHEMA_CATG_TSK</code></td><td>Serverless task</td><td>Runs every 3 minutes</td></tr>
+<tr><td><code>WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK</code></td><td>Serverless task (triggered)</td><td>Runs when a rule stream has data; no schedule</td></tr>
+<tr><td><code>NPF_CSTM_RULE_MSTR_CATG_STRM</code>, <code>NPF_CSTM_RULE_COND_CATG_STRM</code></td><td>Streams</td><td>Signal that a rule changed. Used as a trigger only; data is always re-read from the base tables</td></tr>
+</tbody></table></div>
+<p>All objects are in <code>&lt;ENV&gt;_WPA_ASSET_DB.CORE</code>. No warehouse is needed because the tasks are serverless (initial size SMALL).</p>
+
+<!-- ============================ 5 ============================ -->
+<h2 id="logic">5. Business logic (view)</h2>
+<p><strong>Grain:</strong> one row per <code>SCHEMA_ID × CUST_SK × INSTR_ID × ISS_TYPE</code>. That is every customer schema crossed with every (instrument, issue type) that customer <strong>ever held, on any date, or transacted</strong>, with reporting type <code>WLT</code>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>CTE</th><th>Oracle equivalent</th><th>What it does / why</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>cust_scope</code></td><td>—</td><td>Customers that have a custom schema. Limits the scan of the huge position and transaction tables.</td></tr>
+<tr><td>2</td><td><code>cust_instr</code></td><td>Caller loop</td><td>(customer, instrument, <strong>issue type</strong>) from positions (any date) plus transactions, de-duplicated with <code>UNION</code>. The issue type comes from the position or transaction row, because one instrument can carry several issue types, each with its own category.</td></tr>
+<tr><td>3</td><td><code>asset_std</code></td><td>6-arg <code>npf_asst_typ_mgr</code></td><td>Standard category per (instrument, issue type) via <code>LEFT JOIN NPF_ASSET_CATG</code>, with defaults <code>30/20 Other Assets/Miscellaneous</code> only when there is no mapping row. Country via <code>LEFT JOIN NPF_DECODE</code>. The inner join to <code>NPF_ASSET</code> means the instrument must exist, as in Oracle.</td></tr>
+<tr><td>4</td><td><code>combo</code></td><td>—</td><td>Distinct (super description, sub description, country). Rules are evaluated <strong>once per combo</strong>, not per instrument, with an identical result.</td></tr>
+<tr><td>5</td><td><code>rule_eval</code></td><td><code>RULE_EVALUATION</code></td><td>Active rules <code>LEFT JOIN</code> conditions (zero-condition rules match) <code>CROSS JOIN</code> combo. Every rule is tested on every combo, as Oracle does; there is no join key. Counts conditions and matches, and sets an OR flag.</td></tr>
+<tr><td>6</td><td><code>rule_pick</code></td><td>desc_1 / desc_2</td><td>Keeps matching rules: an OR rule needs any condition true, an AND rule needs all. Keeps the first (<code>MIN_BY</code>) and, when there is more than one match, the last (<code>MAX_BY</code>) matching rule.</td></tr>
+<tr><td>7</td><td><code>cstm_row</code></td><td><code>v_rec_cnt</code> + custom cursor</td><td>Active custom row (<code>END_DT IS NULL</code>) per schema and instrument. <code>QUALIFY</code> on the latest <code>START_DT</code> is a safeguard (0 duplicates today).</td></tr>
+<tr><td>8</td><td><code>calls</code> / <code>out</code></td><td>11-arg <code>npf_asst_typ_mgr</code></td><td><strong>Path 1</strong> (custom row exists): custom descriptions with <code>-C</code>/<code>-S</code> codes. <strong>Path 2</strong>: <code>COALESCE(last rule, first rule, standard)</code> with <code>&lt;sup&gt;-S</code> / <code>&lt;sup&gt;-&lt;sub&gt;-S</code> codes.</td></tr>
+</tbody></table></div>
+
+<h3>Oracle → Snowflake semantic rules applied</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Oracle behaviour</th><th>Snowflake handling</th></tr></thead>
+<tbody>
+<tr><td><code>''</code> is NULL</td><td><code>NULLIF(col,'')</code> on every text input</td></tr>
+<tr><td><code>CONCAT(NULL,'x') = 'x'</code></td><td><code>NVL(col,'') || '-S'</code></td></tr>
+<tr><td>Defaults only when the FETCH finds no row</td><td><code>IFF(mapping row missing, default, column)</code></td></tr>
+<tr><td>NULL never matches a condition</td><td>Native in Snowflake</td></tr>
+<tr><td>A zero-condition rule matches</td><td><code>LEFT JOIN</code> conditions; <code>0 = 0</code></td></tr>
+<tr><td>NULL description or issue type still processed</td><td>Null-safe join keys <code>NVL(x,'#NULL#')</code> and <code>EQUAL_NULL()</code></td></tr>
+</tbody></table></div>
+
+<!-- ============================ 6 ============================ -->
+<h2 id="load">6. Load mechanism</h2>
+<p>A Snowflake task can have <em>either</em> a fixed schedule <em>or</em> a stream condition. The two requirements (every 3 minutes, and immediately on a rule change) are therefore met by <strong>two tasks calling one procedure</strong>, so the load logic exists only once.</p>
+
+<h3>Procedure steps: <code>WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP</code></h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Step</th><th>Action</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>Consume both rule streams (an INSERT that reads them into a session temp table, <code>WHERE 1 = 0</code>), committed on its own</td><td>Done <em>before</em> the snapshot, so a rule change made during the load stays in the stream and triggers the next run. A scheduled run also clears the streams, so there is no redundant triggered run.</td></tr>
+<tr><td>a</td><td>Stage the view once into a temp table</td><td>The heavy logic runs once; MERGE and DELETE read the same snapshot.</td></tr>
+<tr><td>b</td><td><code>MERGE</code> on <code>SCHEMA_ID, CUST_SK, INSTR_ID, EQUAL_NULL(ISS_TYPE)</code></td><td>Inserts new rows; updates only rows whose values changed (<code>IS DISTINCT FROM</code>). <code>LOAD_TS</code> = when that row last changed.</td></tr>
+<tr><td>c</td><td><code>DELETE … WHERE NOT EXISTS</code> in the stage</td><td>Removes rows the view no longer returns (ended custom row, customer removed from a schema). MERGE has no "not matched by source" clause.</td></tr>
+<tr><td>—</td><td>b + c in one transaction; on error <code>ROLLBACK</code> + <code>RAISE</code></td><td>Readers never see a half-applied load; the task run shows FAILED with the error.</td></tr>
+</tbody></table></div>
+
+<h3>Tasks</h3>
+<pre><code>-- regular
+CREATE OR REPLACE TASK ..._CATG_TSK
+  SCHEDULE = '3 MINUTES'
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '3 MINUTES'
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+AS CALL ..._CATG_LOAD_SP();
+
+-- immediate on rule change (triggered, no schedule)
+CREATE OR REPLACE TASK ..._CATG_RULE_TSK
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  WHEN SYSTEM$STREAM_HAS_DATA('..._RULE_MSTR_CATG_STRM')
+    OR SYSTEM$STREAM_HAS_DATA('..._RULE_COND_CATG_STRM')
+AS CALL ..._CATG_LOAD_SP();</code></pre>
+
+<!-- ============================ 7 ============================ -->
+<h2 id="scenarios">7. Change &amp; failure scenarios</h2>
+<div class="callout"><strong>Key principle:</strong> the streams are only a <em>"something changed"</em> trigger. The procedure never reads rule data from them; every run recomputes the full result from the base tables. So consuming a stream can never lose a change.</div>
+<div class="table-wrap"><table>
+<thead><tr><th>Scenario</th><th>What happens</th><th>Outcome</th></tr></thead>
+<tbody>
+<tr><td>User changes a rule while no load is running</td><td>The stream gets data → the rule task fires</td><td>Applied in about 1 minute</td></tr>
+<tr><td>User changes a rule <strong>during</strong> a scheduled load (after step 0)</td><td>The change is after the stream offset, so it stays in the stream → the rule task runs right after</td><td>Applied right after the current run; never missed</td></tr>
+<tr><td>Rule changed before step 0 of a scheduled run</td><td>Consumed by that run and included in its snapshot</td><td>Applied in that run</td></tr>
+<tr><td>Both tasks fire at the same time</td><td>Each stages its own snapshot; Snowflake makes the second MERGE wait for the first</td><td>Consistent; no partial rows</td></tr>
+<tr><td>Load fails after step 0</td><td>Rollback, so the table is unchanged; the stream is already consumed</td><td>The next 3-minute run recomputes and applies it (≤ 3 min delay)</td></tr>
+<tr><td>Persistent error (e.g. a duplicate key from bad data)</td><td>Each run fails; the task suspends after 3 failures</td><td>Visible in <code>TASK_HISTORY</code>; the table keeps its last good state</td></tr>
+<tr><td>Position / transaction / asset change</td><td>Picked up by the 3-minute task</td><td>≤ 3 minutes</td></tr>
+<tr><td>Liquibase redeploys the scripts</td><td><code>CREATE STREAM IF NOT EXISTS</code> keeps the stream offsets; <code>CREATE TABLE IF NOT EXISTS</code> keeps the data</td><td>No reset, no data loss</td></tr>
+</tbody></table></div>
+
+<!-- ============================ 8 ============================ -->
+<h2 id="parity">8. Oracle parity &amp; validation</h2>
+<ul>
+  <li><strong>Oracle comparison:</strong> 25 hand-picked (schema, instrument) cases covering all 7 Oracle branches (custom paths CC/SC/CS/SS; rule paths R1/RN/standard) were run through the Oracle procedure in VS Code and compared with Snowflake. <strong>All matched.</strong></li>
+  <li><strong>Independent validation script</strong> (<code>Validation - CSTM Asset Schema Catg DY.sql</code>): re-implements the Oracle logic separately, evaluating rules per instrument rather than per combo, and compares every row and every column by scenario. It also checks duplicates, NULLs, code formats, customer consistency, and the comparison with the old table.</li>
+  <li><strong>Data checks:</strong> 0 duplicate active custom rows, 0 zero-condition rules, 0 empty strings in the key columns.</li>
+  <li><strong>Grain check:</strong> unique on <code>SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE</code> (query included in the script).</li>
+</ul>
+
+<!-- ============================ 9 ============================ -->
+<h2 id="deployment">9. Deployment</h2>
+<p>File <code>View Based Approach Liquibase Deployment.sql</code> (UAT2 version) contains these changesets, in order:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>Changeset</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>View</td><td><code>CREATE OR REPLACE VIEW</code></td></tr>
+<tr><td>2</td><td>Target table</td><td><code>CREATE TABLE IF NOT EXISTS</code></td></tr>
+<tr><td>3</td><td>One-time truncate</td><td>Rows loaded on the old key (without <code>ISS_TYPE</code>)</td></tr>
+<tr><td>4–5</td><td>Rule streams</td><td><code>IF NOT EXISTS</code>; pre-req: change tracking on the rule tables</td></tr>
+<tr><td>6</td><td>Load procedure</td><td><code>splitStatements:false runOnChange:true</code></td></tr>
+<tr><td>7–8</td><td>Tasks (3-min and rule-triggered)</td><td>Serverless</td></tr>
+<tr><td>9–10</td><td>Resume tasks</td><td>Tasks are created suspended</td></tr>
+</tbody></table></div>
+<p><strong>Pre-requisites:</strong></p>
+<ul>
+  <li><code>CHANGE_TRACKING = TRUE</code> on <code>NPF_CSTM_RULE_MSTR</code> and <code>NPF_CSTM_RULE_COND</code>.</li>
+  <li><code>EXECUTE MANAGED TASK</code> for the owner role.</li>
+  <li>For other environments, replace the <code>UAT2_</code> prefix.</li>
+</ul>
+
+<!-- ============================ 10 ============================ -->
+<h2 id="risks">10. Risks, open points &amp; decisions needed</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>Item</th><th>Impact</th><th>Proposal / owner</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Transaction issue-type column name (assumed <code>WPA_TRANSACTION.AST_ISS_TYPE</code>)</td><td>The view fails to compile if wrong</td><td>Confirm before UAT2</td></tr>
+<tr><td>2</td><td>Position rows with a blank issue type</td><td>They get the default category (30/20)</td><td>Decide: keep, or fall back to <code>NPF_ASSET.ISS_TYPE</code></td></tr>
+<tr><td>3</td><td>Run time vs the 3-minute interval</td><td>Overlapping runs are skipped and latency grows</td><td>Measure in UAT2 (<code>TASK_HISTORY</code>); the serverless size adapts to <code>TARGET_COMPLETION_INTERVAL</code>, or start at MEDIUM</td></tr>
+<tr><td>4</td><td>Serverless cost of a run every 3 minutes, which recomputes the full view</td><td>Credit usage</td><td>Review after one week in UAT2; move to 5 or 10 minutes if acceptable</td></tr>
+<tr><td>5</td><td>Should custom-row (<code>NPF_CSTM_SCHEMA</code>) or customer-schema changes also be immediate?</td><td>Today ≤ 3 minutes</td><td>Add streams to the rule task's <code>WHEN</code> condition if required</td></tr>
+<tr><td>6</td><td>Several active custom rows for one key (Oracle order undefined)</td><td>None today (0 cases)</td><td>Latest <code>START_DT</code> wins; confirm with the business</td></tr>
+</tbody></table></div>
+
+<!-- ============================ 11 ============================ -->
+<h2 id="next-steps">11. Next steps</h2>
+<ol>
+  <li>Agree on the approach and the decisions in §10.</li>
+  <li>Deploy to UAT2 through Liquibase; run the first load (<code>CALL ..._LOAD_SP()</code>).</li>
+  <li>Run the validation script against the table and the per-customer counts against Oracle.</li>
+  <li>Test the rule-change path: edit a rule, confirm the rule task runs and the target table reflects the change.</li>
+  <li>Monitor run time and cost for one week, then tune the schedule or size.</li>
+  <li>Promote to PROD; decommission the old procedure and streams after a parallel run.</li>
+</ol>
+
+<footer>
+  Source files (workspace folder <code>CSTM Asset schema</code>): <code>CSTM Asset Schema Catg - View + Task.sql</code> ·
+  <code>View Based Approach Liquibase Deployment.sql</code> · <code>CSTM Asset Schema Catg DT - Oracle Parity.sql</code> ·
+  <code>Validation - CSTM Asset Schema Catg DY.sql</code> · <code>Review Guide - CSTM Asset Schema Catg.md</code>
+</footer>
+</body>
+</html>

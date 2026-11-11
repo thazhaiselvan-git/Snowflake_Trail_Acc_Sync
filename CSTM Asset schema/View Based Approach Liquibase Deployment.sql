@@ -1,15 +1,15 @@
 --liquibase formatted sql
 
--- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_VW-VIEW_APPROACH_V2 stripComments:false
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_VW-VIEW_APPROACH_V3 stripComments:false
 -- comment: grain SCHEMA_ID x CUST_SK x INSTR_ID x ISS_TYPE (issue type from position / transaction)
-CREATE OR REPLACE VIEW UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW
+CREATE OR REPLACE VIEW DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW
   COMMENT = 'Oracle npf_asst_typ_mgr (11-arg) + RULE_EVALUATION per customer schema x customer instrument x issue type (issue type from position / transaction AST_ISS_TYPE). Loaded into WPA_CSTM_ASSET_SCHEMA_CATG_TBL by WPA_CSTM_ASSET_SCHEMA_CATG_TSK.'
 AS
 WITH
 -- customers that have a custom schema: limits the scan of the huge position/txn tables
 cust_scope AS (
     SELECT DISTINCT cust_sk
-    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
     WHERE cust_sk IS NOT NULL
 ),
 -- (DT4) instrument + ISSUE TYPE each in-scope customer ever held (any date) or transacted.
@@ -18,12 +18,12 @@ cust_scope AS (
 -- separate rows.
 cust_instr AS (
     SELECT p.cust_sk, p.instr_id, NULLIF(p.ast_iss_type, '') AS iss_type
-    FROM UAT2_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
     WHERE p.instr_id IS NOT NULL
       AND p.cust_sk IN (SELECT cust_sk FROM cust_scope)
     UNION                                                   -- de-duplicates
     SELECT t.cust_sk, t.instr_id, NULLIF(t.ast_iss_type, '') AS iss_type   -- confirm column name
-    FROM UAT2_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
+    FROM DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
     WHERE t.instr_id IS NOT NULL
       AND t.cust_sk IN (SELECT cust_sk FROM cust_scope)
 ),
@@ -51,12 +51,12 @@ asset_std AS (
             IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
             NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
         FROM instr_iss ii
-        JOIN UAT2_WPA_ASSET_DB.CORE.NPF_ASSET a                  -- instr must exist in NPF_ASSET
+        JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET a                  -- instr must exist in NPF_ASSET
           ON a.instr_id = ii.instr_id
-        LEFT JOIN UAT2_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+        LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
                ON ac.rptg_type = 'WLT'
               AND ac.iss_type  = ii.iss_type                     -- position/Tran issue type
-        LEFT JOIN UAT2_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+        LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
                ON d.dcde_type = 'CNTRY'
               AND d.dcde_code = a.cntry_risk_dcde
     )
@@ -89,12 +89,12 @@ rule_eval AS (
                ((c.rule_oper = 'EQUAL'    AND cb.cntry_desc   =  NULLIF(c.rule_fld_value, '')) OR
                 (c.rule_oper = 'NOTEQUAL' AND cb.cntry_desc   != NULLIF(c.rule_fld_value, ''))))
         )                                     AS match_cnt        -- P4: NULL -> not counted
-    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
-    LEFT JOIN UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c         -- LEFT: P6
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c         -- LEFT: P6
            ON c.rule_sk = r.rule_sk
     CROSS JOIN combo cb                                           -- every rule tested on every combo
     WHERE r.rule_stat = 'A'
-      AND r.schema_id IN (SELECT schema_id FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA)
+      AND r.schema_id IN (SELECT schema_id FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA)
     GROUP BY r.schema_id, cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
              r.rule_sk, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc
 ),
@@ -122,7 +122,7 @@ cstm_row AS (
         NULLIF(ncs.cstm_subcatg_code, '') AS cstm_subcatg_code,
         NULLIF(ncs.cstm_subcatg_desc, '') AS cstm_subcatg_desc,
         NULLIF(ncs.npf_subcatg_code,  '') AS npf_subcatg_code
-    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
     WHERE ncs.rptg_type = 'WLT'
       AND ncs.end_dt IS NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY ncs.schema_id, ncs.instr_id
@@ -138,7 +138,7 @@ calls AS (
         cr.cstm_supcatg_code, cr.cstm_supcatg_desc, cr.npf_supcatg_code,
         cr.cstm_subcatg_code, cr.cstm_subcatg_desc, cr.npf_subcatg_code,
         rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
-    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
     JOIN cust_instr ci ON ci.cust_sk  = s.cust_sk
     JOIN asset_std  a  ON a.instr_id  = ci.instr_id
                       AND EQUAL_NULL(a.iss_type, ci.iss_type)   -- NULL issue type kept (gets defaults)
@@ -187,8 +187,8 @@ SELECT
     schema_desc
 FROM out;
 
--- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TBL-VIEW_APPROACH_V1 stripComments:false
-CREATE TABLE IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL (
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TBL-VIEW_APPROACH_V3 stripComments:false
+CREATE TABLE IF NOT EXISTS DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL (
     SCHEMA_ID          NUMBER,
     CUST_SK            NUMBER,
     INSTR_ID           VARCHAR,
@@ -207,30 +207,55 @@ CREATE TABLE IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL
 )
 COMMENT = 'Loaded by task WPA_CSTM_ASSET_SCHEMA_CATG_TSK from view WPA_CSTM_ASSET_SCHEMA_CATG_VW (MERGE + DELETE on SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE).';
 
--- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TBL-TRUNCATE-VIEW_APPROACH_V2 stripComments:false
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TBL-TRUNCATE-VIEW_APPROACH_V3 stripComments:false
 -- comment: one-time - rows loaded on the old key (no ISS_TYPE); next task run reloads fully
-TRUNCATE TABLE IF EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL;
+TRUNCATE TABLE IF EXISTS DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL;
 
--- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-VIEW_APPROACH_V2 stripComments:false splitStatements:false
--- comment: serverless, 15 min (testing), MERGE + DELETE on SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE
-CREATE OR REPLACE TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK
-  SCHEDULE = '15 MINUTES'                                   -- testing; later e.g. 'USING CRON 0 6 * * * America/New_York'
-  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
-  TARGET_COMPLETION_INTERVAL = '15 MINUTES'
-  USER_TASK_TIMEOUT_MS = 21600000                           -- 6 hours
-  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+-- changeset root:NPF_CSTM_RULE_MSTR_CATG_STRM-VIEW_APPROACH_V3 stripComments:false
+-- comment: requires CHANGE_TRACKING = TRUE on NPF_CSTM_RULE_MSTR
+CREATE STREAM IF NOT EXISTS DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM
+  ON TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK on rule master changes';
+
+-- changeset root:NPF_CSTM_RULE_COND_CATG_STRM-VIEW_APPROACH_V3 stripComments:false
+-- comment: requires CHANGE_TRACKING = TRUE on NPF_CSTM_RULE_COND
+CREATE STREAM IF NOT EXISTS DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM
+  ON TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK on rule condition changes';
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP-VIEW_APPROACH_V3 stripComments:false splitStatements:false runOnChange:true
+-- comment: MERGE + DELETE load; consumes the rule streams first
+CREATE OR REPLACE PROCEDURE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP()
+  RETURNS VARCHAR
+  LANGUAGE SQL
   COMMENT = 'Delta load (MERGE + DELETE) of WPA_CSTM_ASSET_SCHEMA_CATG_TBL from WPA_CSTM_ASSET_SCHEMA_CATG_VW'
+  EXECUTE AS CALLER                                         -- must come after COMMENT
 AS
+$$
+DECLARE
+    v_ins_upd NUMBER DEFAULT 0;
+    v_del     NUMBER DEFAULT 0;
 BEGIN
+    -- 0) consume rule streams: a stream offset only moves when DML READS it in a
+    --    committed transaction. Target = session temp table, never gets rows.
+    --    (CREATE is DDL -> must run before BEGIN TRANSACTION, DDL auto-commits)
+    CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk NUMBER);
+    BEGIN TRANSACTION;
+    INSERT INTO DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM WHERE 1 = 0;
+    INSERT INTO DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM WHERE 1 = 0;
+    COMMIT;
+
     -- a) stage
-    CREATE OR REPLACE TEMPORARY TABLE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG AS
-    SELECT * FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW;
+    CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG AS
+    SELECT * FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW;
 
     BEGIN TRANSACTION;
 
     -- b) upsert
-    MERGE INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
-    USING UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
+    MERGE INTO DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
+    USING DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
        ON  t.schema_id = s.schema_id
        AND t.cust_sk   = s.cust_sk
        AND t.instr_id  = s.instr_id
@@ -267,19 +292,59 @@ BEGIN
          s.supcatg_code, s.subcatg_code, s.supcatg_desc, s.subcatg_desc,
          s.cstm_supcatg_code, s.cstm_subcatg_code, s.cstm_supcatg_desc, s.cstm_subcatg_desc,
          s.schema_desc, CURRENT_TIMESTAMP());
+    v_ins_upd := SQLROWCOUNT;
 
     -- c) remove keys the view no longer produces
-    DELETE FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
+    DELETE FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
     WHERE NOT EXISTS (
         SELECT 1
-        FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
+        FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
         WHERE s.schema_id = t.schema_id
           AND s.cust_sk   = t.cust_sk
           AND s.instr_id  = t.instr_id
           AND EQUAL_NULL(s.iss_type, t.iss_type));
+    v_del := SQLROWCOUNT;
 
     COMMIT;
+    RETURN 'merged (ins+upd): ' || v_ins_upd || ', deleted: ' || v_del;
+EXCEPTION
+    WHEN OTHER THEN
+        ROLLBACK;
+        RAISE;                                   -- task run shows FAILED with the error
 END;
+$$;
 
--- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-RESUME-VIEW_APPROACH_V2 stripComments:false
-ALTER TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK RESUME;
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-SUSPEND-VIEW_APPROACH_V3 stripComments:false
+-- comment: a running (started) task can't be replaced cleanly; suspend before CREATE OR REPLACE
+ALTER TASK IF EXISTS DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK SUSPEND;
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-VIEW_APPROACH_V3 stripComments:false
+-- comment: serverless, every 3 minutes -> LOAD_SP
+CREATE OR REPLACE TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK
+  SCHEDULE = '3 MINUTES'
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'                  -- Snowflake sizes compute to finish within this
+  USER_TASK_TIMEOUT_MS = 21600000                           -- 6 hours
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'Every 3 min: WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP (view -> table delta load)'
+AS
+  CALL DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK-VIEW_APPROACH_V3 stripComments:false
+-- comment: serverless, triggered by the rule streams -> LOAD_SP
+CREATE OR REPLACE TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'                  -- Snowflake sizes compute to finish within this
+  USER_TASK_TIMEOUT_MS = 21600000
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'On rule table change: WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP (immediate refresh)'
+  WHEN SYSTEM$STREAM_HAS_DATA('DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM')
+    OR SYSTEM$STREAM_HAS_DATA('DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM')
+AS
+  CALL DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-RESUME-VIEW_APPROACH_V3 stripComments:false
+ALTER TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK RESUME;
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK-RESUME-VIEW_APPROACH_V3 stripComments:false
+ALTER TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK RESUME;
