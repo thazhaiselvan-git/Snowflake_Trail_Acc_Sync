@@ -1,4 +1,238 @@
 
+��
+:CSTM Asset schema/Review Guide - CSTM Asset Schema Catg.mdÂ# Review Guide: CSTM Asset Schema Category (Dynamic Table version)
+
+This guide walks through `CSTM Asset Schema Catg DT - Oracle Parity.sql` one block at a time, explaining **why** each join, filter and function is there. The View + Task version (`CSTM Asset Schema Catg - View + Task.sql`) uses exactly the same logic, with each dynamic table as a CTE, so everything below applies to it too.
+
+---
+
+## 0. What we are rebuilding
+
+Oracle calls `npf_common_pkg.npf_asst_typ_mgr` (the 11-argument version) **once per customer schema × instrument × issue type**. For each call it:
+
+1. **Standard category** (the 6-argument proc): looks up `NPF_ASSET_CATG` with the issue type passed in. If no mapping row exists it falls back to the defaults `30 / 20 / Other Assets / Miscellaneous`.
+2. **Path 1, custom row:** if `NPF_CSTM_SCHEMA` has an active custom row for (schema, instrument), it uses the custom descriptions and builds `-C` / `-S` codes.
+3. **Path 2, no custom row:** it runs `RULE_EVALUATION` (the schema's rules tested against the standard descriptions and the country). A matching rule's descriptions win; otherwise the standard descriptions are used.
+
+**Output key:** `SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE`.
+
+## 1. Object flow
+
+```
+WPA_AC_POSITION + WPA_TRANSACTION
+        │
+        ▼
+DT4 WPA_CAS_CUST_INSTR_DYN    (cust, instr, issue type)       ← created FIRST
+        │
+        ▼  + WPA_ASSET_DYN + NPF_ASSET_CATG + NPF_DECODE
+DT1 WPA_CAS_ASSET_STD_DYN     (instr, issue type) → standard category + country
+        │
+        ▼  + NPF_CSTM_RULE_MSTR / NPF_CSTM_RULE_COND
+DT2 WPA_CAS_RULE_PICK_DYN     (schema, desc combo) → first / last matching rule
+
+DT3 WPA_CAS_CSTM_ROW_DYN      (schema, instr) → active custom row   ◀─ NPF_CSTM_SCHEMA
+
+FINAL WPA_CSTM_ASSET_SCHEMA_CATG_DY
+  = NPF_CUST_CSTM_SCHEMA ⋈ DT4 ⋈ DT1  ⟕ DT3  ⟕ DT2
+```
+
+**Why 5 objects rather than 1?** Each table does one Oracle step, stays incrementally refreshable, and each source is read only once. Expensive work (de-duplication, rule evaluation) is done once and reused, instead of being recomputed on every refresh.
+
+---
+
+## 2. Oracle → Snowflake rules applied everywhere (P1–P11)
+
+| # | Oracle behaviour | Snowflake implementation | Why it matters |
+|---|---|---|---|
+| P1 | Defaults apply only when the `FETCH` finds no row | `IFF(ac.iss_type IS NULL, '30', ac.supcatg_code)` | If a mapping row exists but its column is NULL, Oracle keeps NULL; it does not use the default. |
+| P2 | `''` is the same as NULL | `NULLIF(col, '')` on every text input | Snowflake treats `''` and NULL as different values; this makes them the same, as in Oracle. |
+| P3 | `CONCAT(NULL,'x') = 'x'` | `NVL(col,'') \|\| '-S'` | In Snowflake `NULL \|\| 'x'` is NULL, so we replace NULL with `''` first. |
+| P4 | A comparison with NULL is never true | Native in Snowflake | A NULL description never matches a rule condition (EQUAL or NOTEQUAL). |
+| P5 | Any condition with `LOGICAL_OPER = 'OR'` makes the whole rule OR | `has_or` flag | Otherwise the rule is AND. |
+| P6 | An active rule with **zero** conditions matches | `LEFT JOIN` to conditions, `cond_cnt = 0` | An inner join would drop such rules. |
+| P7 | 1 match → that rule; more than 1 → the last (highest RULE_SK); per column it falls back last → first → standard | `MIN_BY` / `MAX_BY` + `COALESCE(rn, r1, std)` | Reproduces how the Oracle loop overwrites values. |
+| P8 | Custom path uses the custom description as-is (even NULL) | `CASE WHEN cstm_hit THEN cstm_desc` | No COALESCE on this path. |
+| P9 | Several active custom rows: Oracle's order is undefined | `QUALIFY ROW_NUMBER() … ORDER BY start_dt DESC = 1` | Safeguard only; there are 0 such cases today. |
+| P10 | `p_cust_sk` is not used inside the proc | — | The customer only decides **which** rows exist, not their values. |
+| P11 | Rule result codes are not used | — | Only rule descriptions feed the output. |
+
+---
+
+## 3. DT4: `WPA_CAS_CUST_INSTR_DYN` (customer → instrument + issue type)
+
+**Purpose:** decide **which rows** exist. This replaces the Oracle caller loop over customer holdings.
+
+```sql
+WITH src AS (
+  SELECT cust_sk, instr_id, NULLIF(ast_iss_type,'') AS iss_type FROM WPA_AC_POSITION  ...
+  UNION ALL
+  SELECT cust_sk, instr_id, NULLIF(ast_iss_type,'') AS iss_type FROM WPA_TRANSACTION ...
+)
+SELECT cust_sk, instr_id, iss_type FROM src GROUP BY cust_sk, instr_id, iss_type;
+```
+
+| Element | Why |
+|---|---|
+| Positions **+** transactions, **any date** | Agreed rule. A latest-date-only filter misses instruments. |
+| `ISS_TYPE` from the source row, not from `NPF_ASSET` | One instrument can appear with several issue types in positions (e.g. `0yujbMNAB.` has 11). Each one gives a different category, so each is its own row. |
+| `UNION ALL` + outer `GROUP BY` instead of `UNION` | Gives the same distinct result, but this shape is incrementally refreshable. New positions only add rows, so refreshes stay small. |
+| `WHERE instr_id IS NOT NULL AND cust_sk IS NOT NULL` | Rows without keys can't join anywhere. |
+| `NULLIF(…,'')` | P2. |
+| Separate table rather than inlined in FINAL | Positions have many rows per (customer, instrument). De-duplicating them here once is far cheaper than inside the final join on every refresh. |
+| `CUST_SK` kept here, not in DT1 | Otherwise DT1 and DT2 would become per-customer, many times larger, and every daily position change would cascade into rule evaluation. |
+
+---
+
+## 4. DT1: `WPA_CAS_ASSET_STD_DYN` (standard category + country)
+
+**Purpose:** the 6-argument `npf_asst_typ_mgr` plus the country-of-risk lookup. One row per (instrument, issue type).
+
+| Join / function | Type | Why |
+|---|---|---|
+| `FROM WPA_CAS_CUST_INSTR_DYN ci` | driver | Only the (instrument, issue type) pairs actually in use. Nothing is computed for unused assets. |
+| `JOIN WPA_ASSET_DYN a ON instr_id` | **INNER** | The Oracle custom cursor requires the instrument to exist in `NPF_ASSET`. An instrument missing there gets no row, as in Oracle. Only `CNTRY_RISK_DCDE` is used from it. |
+| `LEFT JOIN NPF_ASSET_CATG ac ON rptg_type='WLT' AND iss_type = ci.iss_type` | **LEFT** | An issue type may have no mapping. The row must stay, and it gets the defaults (P1). |
+| `LEFT JOIN NPF_DECODE d ON dcde_type='CNTRY' AND dcde_code = cntry_risk_dcde` | **LEFT** | The country may be missing. Oracle returns a NULL description and still processes the row. |
+| `IFF(ac.iss_type IS NULL, '30', NULLIF(ac.supcatg_code,''))` | | P1: the default applies only when the mapping **row** is missing, not when its column is NULL. |
+| `NVL(desc,'#NULL#') AS *_DESC_KEY` | | A **null-safe join key** for DT2 and FINAL. `NULL = NULL` is never true in a join, so NULL descriptions would otherwise never find their rule result. `#NULL#` is a value that can't occur in real data. |
+| `GROUP BY ALL` (top level) | | DT4 has one row per customer; this collapses to one row per (instrument, issue type). Being at the top level keeps the table incrementally refreshable. |
+| `ac.iss_type = ci.iss_type` (not `a.iss_type`) | | The Oracle proc categorises using the issue type it is **passed**, which is the position's or transaction's, not the asset master's. |
+
+---
+
+## 5. DT2: `WPA_CAS_RULE_PICK_DYN` (`RULE_EVALUATION`)
+
+**Purpose:** for every schema's active rules, find which rules match each combination of standard super description, standard sub description and country description.
+
+### 5.1 `combo` CTE
+```sql
+SELECT std_sup_desc, std_sub_desc, cntry_desc, <3 keys> FROM DT1 GROUP BY ...
+```
+**Why:** a rule condition can only test these 3 values. Thousands of instruments share a few hundred distinct combos, so we evaluate rules **once per combo**, not once per instrument. The result is identical to Oracle's, at a fraction of the cost.
+
+### 5.2 `rule_eval` CTE
+
+| Join / function | Type | Why |
+|---|---|---|
+| `FROM NPF_CSTM_RULE_MSTR r WHERE rule_stat = 'A'` | | Only active rules, as in the Oracle cursor. |
+| `LEFT JOIN NPF_CSTM_RULE_COND c ON rule_sk` | **LEFT** | P6: a rule with zero conditions must still exist and match. An inner join would drop it. |
+| `CROSS JOIN combo` | **CROSS** | `RULE_EVALUATION` tests **every** active rule of a schema against the instrument's values. There is no key to join rules to combos: whether a rule applies is the *result* of the evaluation, not a join condition. So every rule is paired with every combo and then evaluated. The size is small (rules × combos, not × instruments). |
+| `MAX(IFF(logical_oper='OR',1,0)) AS has_or` | | P5: any OR condition makes the rule OR. |
+| `COUNT(c.rule_sk) AS cond_cnt` | | Number of conditions. It counts only real condition rows, so a zero-condition rule gives 0. |
+| `COUNT_IF(<field = / != value>) AS match_cnt` | | How many conditions are true. NULL comparisons evaluate to NULL, which isn't counted (P4). |
+| `NULLIF(rule_fld_value,'')` | | P2. |
+| `GROUP BY schema_id, combo keys, rule_sk, rule descs` | | One row per (schema, combo, rule). |
+
+### 5.3 Final SELECT
+
+| Element | Why |
+|---|---|
+| `WHERE (has_or=1 AND match_cnt>0) OR (has_or=0 AND match_cnt=cond_cnt)` | The Oracle decision: an OR rule needs any condition true; an AND rule needs all. A zero-condition AND rule gives `0 = 0`, so it matches (P6). |
+| `MIN_BY(desc, rule_sk) AS r1_*` | The first matching rule (lowest RULE_SK). |
+| `IFF(COUNT(*)>1, MAX_BY(desc, rule_sk), NULL) AS rn_*` | The last matching rule, only when there is more than one match. This reproduces Oracle's `desc_1` / `desc_2` (P7). |
+| Only combos with at least 1 match are stored | Combos with no match fall back to the standard descriptions in FINAL, via the LEFT JOIN. |
+
+> **DT insight `TOP_LEVEL_AGGREGATE_NOT_TOP_LEVEL`:** this is reported because `rule_eval` aggregates inside a CTE. We left it as is because the table is small (rules × combos). Splitting it would add an object for no real gain.
+
+---
+
+## 6. DT3: `WPA_CAS_CSTM_ROW_DYN` (custom row)
+
+**Purpose:** Oracle's `v_rec_cnt > 0` check plus the custom cursor. It finds the active custom override for each schema and instrument.
+
+| Element | Why |
+|---|---|
+| `WHERE rptg_type='WLT' AND end_dt IS NULL` | Active WLT custom rows only, as in Oracle. |
+| `NULLIF(col,'')` on all 6 columns | P2. |
+| `QUALIFY ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id, rptg_type ORDER BY start_dt DESC) = 1` | P9 safeguard. If more than one active row ever exists, keep the latest. It guarantees one row per key, so FINAL can never duplicate. Today it removes 0 rows. |
+| Keyed by (schema, instrument) only, **not** issue type | Oracle's custom cursor doesn't use the issue type. So every issue type of the instrument gets the same custom description; only the standard codes differ. |
+| Separate table (decision: option A) | It isolates the QUALIFY and keeps FINAL a simple join. |
+
+---
+
+## 7. FINAL: `WPA_CSTM_ASSET_SCHEMA_CATG_DY` (11-argument proc)
+
+### 7.1 `calls` CTE: one row per Oracle call
+
+| Join | Type | Why |
+|---|---|---|
+| `FROM NPF_CUST_CSTM_SCHEMA s` | driver | Every (customer, schema) assignment. |
+| `JOIN DT4 ci ON ci.cust_sk = s.cust_sk` | **INNER** | Only that customer's own instruments and issue types. This fixed the earlier "every customer gets every instrument" problem (399,775 → about 6,104 instruments for customer 104265). |
+| `JOIN DT1 a ON instr_id AND EQUAL_NULL(iss_type)` | **INNER** | Gets the standard category for **that** issue type. `EQUAL_NULL` makes NULL match NULL, so positions with no issue type are kept (they get the defaults). A plain `=` would drop them. Inner join means the instrument must exist in NPF_ASSET. |
+| `LEFT JOIN DT3 cr ON schema_id AND instr_id` | **LEFT** | Most rows have **no** custom row. LEFT keeps them, and `cr.schema_id IS NULL` then means "Path 2". |
+| `LEFT JOIN DT2 rp ON schema_id AND 3 *_DESC_KEYs` | **LEFT** | Most combos match no rule. LEFT keeps them, and they fall back to standard. The `*_DESC_KEY` columns make NULL descriptions join correctly. |
+| `cr.schema_id AS cstm_hit` | | A flag: NOT NULL means Path 1 (custom row exists). |
+
+### 7.2 `out` CTE: Oracle's IF / ELSE
+
+| Output column | Logic | Why |
+|---|---|---|
+| `SUPCATG_CODE`, `SUBCATG_CODE` | always standard | In Oracle these OUT parameters always hold the 6-argument proc result. |
+| `SUPCATG_DESC` | `CASE WHEN cstm_hit THEN cstm_desc ELSE COALESCE(rn_sup, r1_sup, std_sup_desc)` | Path 1 uses the custom description as-is (P8). Path 2 uses the last rule, then the first rule, then standard (P7). |
+| `CSTM_SUPCATG_CODE` | Path 1: `IFF(cstm code NULL, NVL(npf code,'')\|\|'-S', cstm code\|\|'-C')`; Path 2: `NVL(std_sup,'')\|\|'-S'` | `-C` means a custom code and `-S` a standard code. Oracle's 4-branch IF matrix reduces to an independent choice per code. `NVL` handles P3. |
+| `CSTM_SUBCATG_CODE` | Path 2: `sup-sub-S` | The Oracle format for the standard sub code. |
+| `CSTM_*_DESC` | = `SUPCATG_DESC` / `SUBCATG_DESC` | Same as the existing table's layout. |
+| `RPTG_TYPE` | `'WLT'` literal | Everything is filtered to WLT. |
+
+**Refresh:** `TARGET_LAG = '60 minutes'`, ADAPTIVE. Upstream tables use `DOWNSTREAM`, so they refresh only when FINAL needs them.
+
+---
+
+## 8. Refresh modes and create order
+
+| Object | Mode | Reason |
+|---|---|---|
+| DT4 cust_instr | ADAPTIVE | Append-mostly; Snowflake picks incremental or full. |
+| DT1 asset_std | ADAPTIVE | Reads DT4 and `WPA_ASSET_DYN` (INCREMENTAL). |
+| DT2 rule_pick | INCREMENTAL | Small; agreed. |
+| DT3 cstm_row | INCREMENTAL | Small; agreed. |
+| FINAL | ADAPTIVE | Large joins; Snowflake picks the cheaper mode. |
+
+**Create order:** DT4 → DT1 → DT2 → DT3 → FINAL, because DT1 now reads DT4.
+
+**Rule:** an INCREMENTAL table can't read a table that refreshes FULL. If DT1 ever resolves to FULL, DT2 fails to create; check `SHOW DYNAMIC TABLES` → `refresh_mode`.
+
+**Change tracking** must be on for the base tables (pre-reqs section of the file).
+
+---
+
+## 9. View + Task version: what is different
+
+| Topic | Dynamic tables | View + Task |
+|---|---|---|
+| Logic | 5 tables | 1 view, each table as a CTE (identical logic) |
+| Asset source | `WPA_ASSET_DYN` | `NPF_ASSET` directly, limited to in-use instruments |
+| Scope | All customers | `cust_scope` CTE: only customers with a custom schema (a semi-join filter on the huge position and transaction tables) |
+| Load | Automatic (lag) | Serverless task: stage → `MERGE` → `DELETE` in one transaction |
+| MERGE key | — | `SCHEMA_ID, CUST_SK, INSTR_ID` + `EQUAL_NULL(ISS_TYPE)` |
+| Updates | — | Only when a value actually changed (`IS DISTINCT FROM`), so `LOAD_TS` = last change |
+| Deletes | Automatic | Explicit `DELETE … WHERE NOT EXISTS`, because MERGE has no "not matched by source" clause |
+| Why stage into a temp table | — | The view runs **once**, and both MERGE and DELETE read the same snapshot |
+
+---
+
+## 10. Likely review questions: short answers
+
+- **Why the CROSS JOIN?** Rules have no join key to instruments; Oracle tests every rule against every input. We cross join rules × *distinct combos* (small), not × instruments.
+- **Why LEFT JOIN to conditions?** Zero-condition rules match in Oracle (P6).
+- **Why LEFT JOIN to custom row and rule pick?** Both are optional. A missing row means "take the next path".
+- **Why `#NULL#` keys / `EQUAL_NULL`?** NULL never equals NULL in a join, and Oracle still processes NULL descriptions and NULL issue types.
+- **Why `NULLIF(x,'')` everywhere?** Oracle treats `''` as NULL; Snowflake doesn't.
+- **Why `NVL(x,'') || '-S'`?** Oracle string concatenation ignores NULL; Snowflake's returns NULL.
+- **Why the QUALIFY in custom row?** It guarantees one custom row per key, so the final table can't duplicate (removes 0 rows today).
+- **Why issue type from positions?** One instrument has several issue types in positions, each with a different category; Oracle categorises using the issue type passed in.
+- **Why not put CUST_SK in the asset table?** It would multiply DT1 and DT2 by customers and make daily position changes cascade into rule evaluation.
+- **Why UNION ALL + GROUP BY instead of UNION?** Same result, but it stays incrementally refreshable.
+- **Is it Oracle-exact?** Yes. 25 hand-picked cases across all 7 scenarios (P1-CC/SC/CS/SS, P2-R1/RN/STD) matched; the validation script re-implements Oracle independently and compares every row.
+
+## 11. Open points to mention
+
+1. Confirm `WPA_TRANSACTION.AST_ISS_TYPE` is the column name.
+2. **Blank issue types:** today a NULL issue type gets the defaults. Should it fall back to `NPF_ASSET.ISS_TYPE` instead?
+3. Final schedule / lag (the task uses 15 minutes for testing).
+4. The spilling insight on FINAL: use `INITIALIZATION_WAREHOUSE`, or a one-size warehouse upsize.
+*
+���� e7af9e9354bc2d76eb8722453916b78b
 ��
 4CSTM Asset schema/Oracle_Asset_Type_Manager_Logic.md��# Oracle Logic Guide – `npf_asst_typ_mgr` + `RULE_EVALUATION`
 
@@ -2587,6 +2821,1678 @@ EUROPE,Lukas Weber
 MIDDLE EAST,Omar Haddad
 *
 ���� a0c33d7806ae7587ed770410a088d93f
+��
+:CSTM Asset schema/CSTM Asset Schema Catg - View + Task.sql��/* =============================================================================
+   UAT2_WPA_ASSET_DB.CORE  -  CSTM ASSET SCHEMA CATG  :  VIEW + TABLE + TASK version
+   Alternative to the 5 dynamic tables (CSTM Asset Schema Catg DT - Oracle Parity.sql).
+   Same Oracle logic (npf_asst_typ_mgr 11-arg + 6-arg + RULE_EVALUATION), parity
+   rules P1-P11 unchanged - only the delivery mechanism differs.
+
+     View  WPA_CSTM_ASSET_SCHEMA_CATG_VW   all logic in ONE view (CTE per former DT)
+     Table WPA_CSTM_ASSET_SCHEMA_CATG_TBL  physical result, read by consumers
+     Proc  WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP   MERGE + DELETE table FROM view
+     Task  WPA_CSTM_ASSET_SCHEMA_CATG_TSK       every 3 minutes -> proc
+     Task  WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK  on rule table change (streams) -> proc
+
+   Why this version
+     - No dependency on WPA_ASSET_DYN (changes often, long running, being moved to
+       a stream-based approach). The view reads NPF_ASSET directly, restricted to
+       the instruments our customers hold/traded -> same "relevant assets" set,
+       computed only for what this table needs.
+     - POSITION / TRANSACTION are huge: they are read once per task run, and only
+       for customers that have a custom schema (semi-join on NPF_CUST_CSTM_SCHEMA),
+       not continuously by DT refreshes.
+     - Load timing is fully controlled (schedule / after upstream load).
+
+   Load : delta MERGE on key (SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE): view staged once,
+          MERGE inserts new / updates changed rows only, DELETE removes keys the
+          view no longer returns; MERGE + DELETE in one transaction (readers see
+          old or new data). LOAD_TS = when that row last changed.
+
+   CTE map (view)                        former DT / Oracle unit
+     cust_scope   customers with a schema   (NPF_CUST_CSTM_SCHEMA)
+     cust_instr   DT4  caller loop          positions any date + transactions
+     asset_std    DT1  6-arg proc + country NPF_ASSET + NPF_ASSET_CATG + NPF_DECODE
+     combo        DT2  distinct desc combos
+     rule_eval    DT2  RULE_EVALUATION per rule
+     rule_pick    DT2  first (R1) / last (RN) match
+     cstm_row     DT3  v_rec_cnt + cstm_asset_cursor
+     calls / out  FINAL 11-arg proc (Path 1 custom / Path 2 rule-std)
+
+   Tasks are serverless (no warehouse); role needs EXECUTE MANAGED TASK.
+   NOT compiled here - UAT2 databases not visible from this session.
+   ============================================================================= */
+
+
+/* -----------------------------------------------------------------------------
+   1. VIEW  -  all logic
+   ----------------------------------------------------------------------------- */
+CREATE OR REPLACE VIEW UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW
+  COMMENT = 'Oracle npf_asst_typ_mgr (11-arg) + RULE_EVALUATION per customer schema x customer instrument x issue type (issue type from position / transaction AST_ISS_TYPE). Loaded into WPA_CSTM_ASSET_SCHEMA_CATG_TBL by WPA_CSTM_ASSET_SCHEMA_CATG_TSK.'
+AS
+WITH
+-- customers that have a custom schema: limits the scan of the huge position/txn tables
+cust_scope AS (
+    SELECT DISTINCT cust_sk
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
+    WHERE cust_sk IS NOT NULL
+),
+-- (DT4) instrument + ISSUE TYPE each in-scope customer ever held (any date) or transacted.
+-- ISS_TYPE comes from the source row itself (position / transaction AST_ISS_TYPE):
+-- one instrument can carry several issue types, each giving its own category ->
+-- separate rows.
+cust_instr AS (
+    SELECT p.cust_sk, p.instr_id, NULLIF(p.ast_iss_type, '') AS iss_type
+    FROM UAT2_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    WHERE p.instr_id IS NOT NULL
+      AND p.cust_sk IN (SELECT cust_sk FROM cust_scope)
+    UNION                                                   -- de-duplicates
+    SELECT t.cust_sk, t.instr_id, NULLIF(t.ast_iss_type, '') AS iss_type   -- confirm column name
+    FROM UAT2_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
+    WHERE t.instr_id IS NOT NULL
+      AND t.cust_sk IN (SELECT cust_sk FROM cust_scope)
+),
+-- distinct (instrument, issue type) pairs to categorise
+instr_iss AS (
+    SELECT DISTINCT instr_id, iss_type FROM cust_instr
+),
+-- (DT1) standard category per (instrument, issue type) + country per instrument
+--       6-arg npf_asst_typ_mgr is called with the passed issue type (position's)
+asset_std AS (
+    SELECT
+        instr_id, iss_type,
+        std_sup_code, std_sub_code, std_sup_desc, std_sub_desc, cntry_desc,
+        NVL(std_sup_desc, '#NULL#') AS sup_desc_key,
+        NVL(std_sub_desc, '#NULL#') AS sub_desc_key,
+        NVL(cntry_desc,   '#NULL#') AS cntry_desc_key
+    FROM (
+        SELECT
+            ii.instr_id,
+            ii.iss_type,
+            -- P1: FETCH overwrites all 4 defaults when a mapping row exists (even NULL values)
+            IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
+            IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
+            IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
+            IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
+            NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
+        FROM instr_iss ii
+        JOIN UAT2_WPA_ASSET_DB.CORE.NPF_ASSET a                  -- instr must exist in NPF_ASSET
+          ON a.instr_id = ii.instr_id
+        LEFT JOIN UAT2_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+               ON ac.rptg_type = 'WLT'
+              AND ac.iss_type  = ii.iss_type                     -- position/Tran issue type
+        LEFT JOIN UAT2_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+               ON d.dcde_type = 'CNTRY'
+              AND d.dcde_code = a.cntry_risk_dcde
+    )
+),
+-- (DT2) distinct desc combinations - rules depend only on these 3 values
+combo AS (
+    SELECT std_sup_desc, std_sub_desc, cntry_desc,
+           sup_desc_key, sub_desc_key, cntry_desc_key
+    FROM asset_std
+    GROUP BY ALL
+),
+-- (DT2) RULE_EVALUATION: per active rule x combo, condition / match counts
+rule_eval AS (
+    SELECT
+        r.schema_id,
+        cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+        r.rule_sk,
+        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
+        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
+        MAX(IFF(c.logical_oper = 'OR', 1, 0)) AS has_or,          -- P5
+        COUNT(c.rule_sk)                      AS cond_cnt,        -- P6: 0 when no conditions
+        COUNT_IF(
+             (c.rule_fld_name = 'CSTM_SUPCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sup_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sup_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_SUBCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sub_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sub_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_CNTRY_RISK_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.cntry_desc   =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.cntry_desc   != NULLIF(c.rule_fld_value, ''))))
+        )                                     AS match_cnt        -- P4: NULL -> not counted
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+    LEFT JOIN UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c         -- LEFT: P6
+           ON c.rule_sk = r.rule_sk
+    CROSS JOIN combo cb                                           -- every rule tested on every combo
+    WHERE r.rule_stat = 'A'
+      AND r.schema_id IN (SELECT schema_id FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA)
+    GROUP BY r.schema_id, cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+             r.rule_sk, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc
+),
+-- (DT2) keep matching rules; first (_1) and last (_2, only when >1 match)  - P7
+rule_pick AS (
+    SELECT
+        schema_id, sup_desc_key, sub_desc_key, cntry_desc_key,
+        MIN_BY(rule_sup_desc, rule_sk)                          AS r1_sup,
+        MIN_BY(rule_sub_desc, rule_sk)                          AS r1_sub,
+        IFF(COUNT(*) > 1, MAX_BY(rule_sup_desc, rule_sk), NULL) AS rn_sup,
+        IFF(COUNT(*) > 1, MAX_BY(rule_sub_desc, rule_sk), NULL) AS rn_sub
+    FROM rule_eval
+    WHERE (has_or = 1 AND match_cnt > 0)
+       OR (has_or = 0 AND match_cnt = cond_cnt)
+    GROUP BY schema_id, sup_desc_key, sub_desc_key, cntry_desc_key
+),
+-- (DT3) active WLT custom row per schema + instrument  - P8, P9
+cstm_row AS (
+    SELECT
+        ncs.schema_id,
+        ncs.instr_id,
+        NULLIF(ncs.cstm_supcatg_code, '') AS cstm_supcatg_code,
+        NULLIF(ncs.cstm_supcatg_desc, '') AS cstm_supcatg_desc,
+        NULLIF(ncs.npf_supcatg_code,  '') AS npf_supcatg_code,
+        NULLIF(ncs.cstm_subcatg_code, '') AS cstm_subcatg_code,
+        NULLIF(ncs.cstm_subcatg_desc, '') AS cstm_subcatg_desc,
+        NULLIF(ncs.npf_subcatg_code,  '') AS npf_subcatg_code
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
+    WHERE ncs.rptg_type = 'WLT'
+      AND ncs.end_dt IS NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY ncs.schema_id, ncs.instr_id
+                               ORDER BY ncs.start_dt DESC) = 1
+),
+-- (FINAL) one row per npf_asst_typ_mgr call: customer schema x customer instrument
+calls AS (
+    SELECT
+        s.schema_id, s.cust_sk, s.schema_desc,
+        a.instr_id, a.iss_type,
+        a.std_sup_code, a.std_sub_code, a.std_sup_desc, a.std_sub_desc,
+        cr.schema_id AS cstm_hit,                                 -- NOT NULL => Path 1
+        cr.cstm_supcatg_code, cr.cstm_supcatg_desc, cr.npf_supcatg_code,
+        cr.cstm_subcatg_code, cr.cstm_subcatg_desc, cr.npf_subcatg_code,
+        rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
+    JOIN cust_instr ci ON ci.cust_sk  = s.cust_sk
+    JOIN asset_std  a  ON a.instr_id  = ci.instr_id
+                      AND EQUAL_NULL(a.iss_type, ci.iss_type)   -- NULL issue type kept (gets defaults)
+    LEFT JOIN cstm_row cr
+           ON cr.schema_id = s.schema_id
+          AND cr.instr_id  = a.instr_id
+    LEFT JOIN rule_pick rp
+           ON rp.schema_id      = s.schema_id
+          AND rp.sup_desc_key   = a.sup_desc_key
+          AND rp.sub_desc_key   = a.sub_desc_key
+          AND rp.cntry_desc_key = a.cntry_desc_key
+),
+out AS (
+    SELECT
+        schema_id, cust_sk, instr_id, iss_type, schema_desc,
+        std_sup_code AS supcatg_code,
+        std_sub_code AS subcatg_code,
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_supcatg_desc                   -- P8
+             ELSE COALESCE(rn_sup, r1_sup, std_sup_desc) END           AS supcatg_desc,   -- P7
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_subcatg_desc
+             ELSE COALESCE(rn_sub, r1_sub, std_sub_desc) END           AS subcatg_desc,
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_supcatg_code IS NULL, NVL(npf_supcatg_code, '') || '-S',
+                                                 cstm_supcatg_code        || '-C')
+             ELSE NVL(std_sup_code, '') || '-S' END                    AS cstm_supcatg_code,   -- P3
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_subcatg_code IS NULL, NVL(npf_subcatg_code, '') || '-S',
+                                                 cstm_subcatg_code        || '-C')
+             ELSE NVL(std_sup_code, '') || '-' || NVL(std_sub_code, '') || '-S' END AS cstm_subcatg_code
+    FROM calls
+)
+SELECT
+    schema_id,
+    cust_sk,
+    instr_id,
+    'WLT'        AS rptg_type,
+    iss_type,
+    supcatg_code,
+    subcatg_code,
+    supcatg_desc,
+    subcatg_desc,
+    cstm_supcatg_code,
+    cstm_subcatg_code,
+    supcatg_desc AS cstm_supcatg_desc,
+    subcatg_desc AS cstm_subcatg_desc,
+    schema_desc
+FROM out;
+
+
+/* -----------------------------------------------------------------------------
+   2. TARGET TABLE  (same columns as the DT + load timestamp)
+   CREATE ... IF NOT EXISTS so re-running the script never drops loaded data.
+   ----------------------------------------------------------------------------- */
+CREATE TABLE IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL (
+    SCHEMA_ID          NUMBER,
+    CUST_SK            NUMBER,
+    INSTR_ID           VARCHAR,
+    RPTG_TYPE          VARCHAR,
+    ISS_TYPE           VARCHAR,
+    SUPCATG_CODE       VARCHAR,
+    SUBCATG_CODE       VARCHAR,
+    SUPCATG_DESC       VARCHAR,
+    SUBCATG_DESC       VARCHAR,
+    CSTM_SUPCATG_CODE  VARCHAR,
+    CSTM_SUBCATG_CODE  VARCHAR,
+    CSTM_SUPCATG_DESC  VARCHAR,
+    CSTM_SUBCATG_DESC  VARCHAR,
+    SCHEMA_DESC        VARCHAR,
+    LOAD_TS            TIMESTAMP_LTZ
+)
+COMMENT = 'Loaded by task WPA_CSTM_ASSET_SCHEMA_CATG_TSK from view WPA_CSTM_ASSET_SCHEMA_CATG_VW (MERGE + DELETE on SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE).';
+-- If column types must match the existing table exactly, use instead:
+-- CREATE TABLE IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL AS
+--   SELECT *, CURRENT_TIMESTAMP()::TIMESTAMP_LTZ AS load_ts
+--   FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW WHERE 1 = 0;
+
+
+/* -----------------------------------------------------------------------------
+   3. LOAD  -  view -> table  (procedure + 2 streams + 2 serverless tasks)
+
+   Requirement (review): normal refresh every 3 minutes; a change to the RULE
+   tables (rare, done by users) should flow to the target IMMEDIATELY.
+   A Snowflake task has EITHER a fixed schedule OR runs on a stream condition,
+   so the two triggers are two tasks calling ONE procedure (logic in one place):
+
+     WPA_CSTM_ASSET_SCHEMA_CATG_TSK       SCHEDULE '3 MINUTES'            (regular)
+     WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK  triggered: WHEN rule stream(s)  (immediate)
+          │                                   has data - no schedule
+          └──────────────┬────────────────────┘
+                         ▼
+          WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP()
+
+   Both runs consume the rule streams first, so a rule change already picked up
+   by a scheduled run does not trigger a second, redundant run.
+   The two tasks can't corrupt each other: each run stages its own snapshot in
+   a session temp table, and DML on the same target table is serialised by
+   Snowflake (the second MERGE waits for the first to commit).
+   ----------------------------------------------------------------------------- */
+
+-- 3a. Change tracking + streams on the rule tables
+-- ALTER TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR SET CHANGE_TRACKING = TRUE;   -- if not already on
+-- ALTER TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND SET CHANGE_TRACKING = TRUE;
+CREATE STREAM IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM
+  ON TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK on rule master changes';
+CREATE STREAM IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM
+  ON TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK on rule condition changes';
+-- (IF NOT EXISTS: re-running the script must not reset the stream offsets.
+--  Add NPF_CSTM_SCHEMA / NPF_CUST_CSTM_SCHEMA streams the same way if custom-row or
+--  schema-assignment changes should also be immediate.)
+
+-- 3c. Load procedure (MERGE load, delta only):
+--   0) consume rule streams FIRST (own transaction): a rule change made while this
+--      run is staging stays in the stream and triggers the next run, so no change
+--      is missed. If a later step fails, the 3-minute task re-applies it anyway.
+--   a) view evaluated ONCE into a temp stage (MERGE + DELETE both read it)
+--   b) MERGE  : insert new keys, update only rows whose values changed
+--               (LOAD_TS changes only for touched rows -> real "last changed" ts)
+--   c) DELETE : keys no longer produced by the view (ended custom row, customer
+--               left schema, ...). Snowflake MERGE has no "NOT MATCHED BY SOURCE".
+--   b + c in one transaction -> readers never see a half-applied load.
+-- Key = (SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE). If the view ever returned duplicate
+-- keys, MERGE fails (ERROR_ON_NONDETERMINISTIC_MERGE = TRUE, default) - intended safeguard.
+CREATE OR REPLACE PROCEDURE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP()
+  RETURNS VARCHAR
+  LANGUAGE SQL
+  COMMENT = 'Delta load (MERGE + DELETE) of WPA_CSTM_ASSET_SCHEMA_CATG_TBL from WPA_CSTM_ASSET_SCHEMA_CATG_VW'
+  EXECUTE AS CALLER                                         -- must come after COMMENT
+AS
+$$
+DECLARE
+    v_ins_upd NUMBER DEFAULT 0;
+    v_del     NUMBER DEFAULT 0;
+BEGIN
+    -- 0) consume rule streams: a stream offset only moves when DML READS it in a
+    --    committed transaction. Target = session temp table, never gets rows.
+    --    (CREATE is DDL -> must run before BEGIN TRANSACTION, DDL auto-commits)
+    CREATE OR REPLACE TEMPORARY TABLE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk NUMBER);
+    BEGIN TRANSACTION;
+    INSERT INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM WHERE 1 = 0;
+    INSERT INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM WHERE 1 = 0;
+    COMMIT;
+
+    -- a) stage
+    CREATE OR REPLACE TEMPORARY TABLE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG AS
+    SELECT * FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW;
+
+    BEGIN TRANSACTION;
+
+    -- b) upsert
+    MERGE INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
+    USING UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
+       ON  t.schema_id = s.schema_id
+       AND t.cust_sk   = s.cust_sk
+       AND t.instr_id  = s.instr_id
+       AND EQUAL_NULL(t.iss_type, s.iss_type)                -- ISS_TYPE is part of the key
+    WHEN MATCHED AND (   t.rptg_type         IS DISTINCT FROM s.rptg_type
+                      OR t.supcatg_code      IS DISTINCT FROM s.supcatg_code
+                      OR t.subcatg_code      IS DISTINCT FROM s.subcatg_code
+                      OR t.supcatg_desc      IS DISTINCT FROM s.supcatg_desc
+                      OR t.subcatg_desc      IS DISTINCT FROM s.subcatg_desc
+                      OR t.cstm_supcatg_code IS DISTINCT FROM s.cstm_supcatg_code
+                      OR t.cstm_subcatg_code IS DISTINCT FROM s.cstm_subcatg_code
+                      OR t.cstm_supcatg_desc IS DISTINCT FROM s.cstm_supcatg_desc
+                      OR t.cstm_subcatg_desc IS DISTINCT FROM s.cstm_subcatg_desc
+                      OR t.schema_desc       IS DISTINCT FROM s.schema_desc)
+    THEN UPDATE SET
+         rptg_type         = s.rptg_type,
+         supcatg_code      = s.supcatg_code,
+         subcatg_code      = s.subcatg_code,
+         supcatg_desc      = s.supcatg_desc,
+         subcatg_desc      = s.subcatg_desc,
+         cstm_supcatg_code = s.cstm_supcatg_code,
+         cstm_subcatg_code = s.cstm_subcatg_code,
+         cstm_supcatg_desc = s.cstm_supcatg_desc,
+         cstm_subcatg_desc = s.cstm_subcatg_desc,
+         schema_desc       = s.schema_desc,
+         load_ts           = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (schema_id, cust_sk, instr_id, rptg_type, iss_type,
+         supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
+         cstm_supcatg_code, cstm_subcatg_code, cstm_supcatg_desc, cstm_subcatg_desc,
+         schema_desc, load_ts)
+    VALUES
+        (s.schema_id, s.cust_sk, s.instr_id, s.rptg_type, s.iss_type,
+         s.supcatg_code, s.subcatg_code, s.supcatg_desc, s.subcatg_desc,
+         s.cstm_supcatg_code, s.cstm_subcatg_code, s.cstm_supcatg_desc, s.cstm_subcatg_desc,
+         s.schema_desc, CURRENT_TIMESTAMP());
+    v_ins_upd := SQLROWCOUNT;
+
+    -- c) remove keys the view no longer produces
+    DELETE FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
+        WHERE s.schema_id = t.schema_id
+          AND s.cust_sk   = t.cust_sk
+          AND s.instr_id  = t.instr_id
+          AND EQUAL_NULL(s.iss_type, t.iss_type));
+    v_del := SQLROWCOUNT;
+
+    COMMIT;
+    RETURN 'merged (ins+upd): ' || v_ins_upd || ', deleted: ' || v_del;
+EXCEPTION
+    WHEN OTHER THEN
+        ROLLBACK;
+        RAISE;                                   -- task run shows FAILED with the error
+END;
+$$;
+
+-- 3d. Regular task: every 3 minutes, serverless
+CREATE OR REPLACE TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK
+  SCHEDULE = '3 MINUTES'
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'                 -- Snowflake sizes compute to finish within this
+  USER_TASK_TIMEOUT_MS = 21600000                           -- 6 hours
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'Every 3 min: WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP (view -> table delta load)'
+AS
+  CALL UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();
+
+-- 3e. Rule-change task: TRIGGERED (no SCHEDULE) - runs as soon as a rule stream has data
+CREATE OR REPLACE TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'                 -- Snowflake sizes compute to finish within this
+  USER_TASK_TIMEOUT_MS = 21600000
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'On rule table change: WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP (immediate refresh)'
+  WHEN SYSTEM$STREAM_HAS_DATA('UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM')
+    OR SYSTEM$STREAM_HAS_DATA('UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM')
+AS
+  CALL UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();
+
+-- Tasks are created suspended
+ALTER TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK      RESUME;
+ALTER TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK RESUME;
+
+
+/* -----------------------------------------------------------------------------
+   4. First load + checks
+   ----------------------------------------------------------------------------- */
+-- EXECUTE TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK;     -- run now
+-- CALL UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();       -- or call directly
+
+-- Rule-change path test: touch a rule, the RULE task should run within ~1 minute
+-- SELECT SYSTEM$STREAM_HAS_DATA('UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM');  -- TRUE after a change
+-- SHOW TASKS LIKE 'WPA_CSTM_ASSET_SCHEMA_CATG%' IN SCHEMA UAT2_WPA_ASSET_DB.CORE;          -- both 'started'
+
+-- Run history (state, duration, errors)
+-- SELECT name, state, scheduled_time, completed_time,
+--        DATEDIFF('second', query_start_time, completed_time) AS secs, error_message
+-- FROM TABLE(UAT2_WPA_ASSET_DB.INFORMATION_SCHEMA.TASK_HISTORY(
+--        RESULT_LIMIT => 50))
+-- WHERE name IN ('WPA_CSTM_ASSET_SCHEMA_CATG_TSK', 'WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK')
+-- ORDER BY scheduled_time DESC;
+
+-- Last run's delta: rows touched by the latest load (inserted or updated)
+-- SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL
+-- WHERE load_ts = (SELECT MAX(load_ts) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL);
+
+-- Grain check: must return 0 rows
+-- SELECT schema_id, cust_sk, instr_id, iss_type, COUNT(*)
+-- FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW
+-- GROUP BY ALL HAVING COUNT(*) > 1;
+
+-- Table vs view (expect same count, 0 diff rows right after a load)
+-- SELECT (SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL) AS tbl_rows,
+--        (SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW)  AS vw_rows;
+
+-- Table vs the validated DT (expect 0 both ways while both exist)
+-- SELECT COUNT(*) FROM (
+--   SELECT * EXCLUDE load_ts FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL
+--   EXCEPT
+--   SELECT * FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY);
+-- SELECT COUNT(*) FROM (
+--   SELECT * FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+--   EXCEPT
+--   SELECT * EXCLUDE load_ts FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL);
+-- (If the DT reads WPA_ASSET_DYN and that filters on a different transaction table,
+--  small differences come from that, not from the logic.)
+
+-- The UAT2 validation script works against the table too: replace
+-- WPA_CSTM_ASSET_SCHEMA_CATG_DY with WPA_CSTM_ASSET_SCHEMA_CATG_TBL in sections 6, 8, 12.
+*
+���� adadb126300249b90d18807f4592ac9d
+��
+>CSTM Asset schema/View Based Approach Liquibase Deployment.sqlˋ--liquibase formatted sql
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_VW-VIEW_APPROACH_V3 stripComments:false
+-- comment: grain SCHEMA_ID x CUST_SK x INSTR_ID x ISS_TYPE (issue type from position / transaction)
+CREATE OR REPLACE VIEW DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW
+  COMMENT = 'Oracle npf_asst_typ_mgr (11-arg) + RULE_EVALUATION per customer schema x customer instrument x issue type (issue type from position / transaction AST_ISS_TYPE). Loaded into WPA_CSTM_ASSET_SCHEMA_CATG_TBL by WPA_CSTM_ASSET_SCHEMA_CATG_TSK.'
+AS
+WITH
+-- customers that have a custom schema: limits the scan of the huge position/txn tables
+cust_scope AS (
+    SELECT DISTINCT cust_sk
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
+    WHERE cust_sk IS NOT NULL
+),
+-- (DT4) instrument + ISSUE TYPE each in-scope customer ever held (any date) or transacted.
+-- ISS_TYPE comes from the source row itself (position / transaction AST_ISS_TYPE):
+-- one instrument can carry several issue types, each giving its own category ->
+-- separate rows.
+cust_instr AS (
+    SELECT p.cust_sk, p.instr_id, NULLIF(p.ast_iss_type, '') AS iss_type
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    WHERE p.instr_id IS NOT NULL
+      AND p.cust_sk IN (SELECT cust_sk FROM cust_scope)
+    UNION                                                   -- de-duplicates
+    SELECT t.cust_sk, t.instr_id, NULLIF(t.ast_iss_type, '') AS iss_type   -- confirm column name
+    FROM DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
+    WHERE t.instr_id IS NOT NULL
+      AND t.cust_sk IN (SELECT cust_sk FROM cust_scope)
+),
+-- distinct (instrument, issue type) pairs to categorise
+instr_iss AS (
+    SELECT DISTINCT instr_id, iss_type FROM cust_instr
+),
+-- (DT1) standard category per (instrument, issue type) + country per instrument
+--       6-arg npf_asst_typ_mgr is called with the passed issue type (position's)
+asset_std AS (
+    SELECT
+        instr_id, iss_type,
+        std_sup_code, std_sub_code, std_sup_desc, std_sub_desc, cntry_desc,
+        NVL(std_sup_desc, '#NULL#') AS sup_desc_key,
+        NVL(std_sub_desc, '#NULL#') AS sub_desc_key,
+        NVL(cntry_desc,   '#NULL#') AS cntry_desc_key
+    FROM (
+        SELECT
+            ii.instr_id,
+            ii.iss_type,
+            -- P1: FETCH overwrites all 4 defaults when a mapping row exists (even NULL values)
+            IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
+            IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
+            IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
+            IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
+            NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
+        FROM instr_iss ii
+        JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET a                  -- instr must exist in NPF_ASSET
+          ON a.instr_id = ii.instr_id
+        LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+               ON ac.rptg_type = 'WLT'
+              AND ac.iss_type  = ii.iss_type                     -- position/Tran issue type
+        LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+               ON d.dcde_type = 'CNTRY'
+              AND d.dcde_code = a.cntry_risk_dcde
+    )
+),
+-- (DT2) distinct desc combinations - rules depend only on these 3 values
+combo AS (
+    SELECT std_sup_desc, std_sub_desc, cntry_desc,
+           sup_desc_key, sub_desc_key, cntry_desc_key
+    FROM asset_std
+    GROUP BY ALL
+),
+-- (DT2) RULE_EVALUATION: per active rule x combo, condition / match counts
+rule_eval AS (
+    SELECT
+        r.schema_id,
+        cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+        r.rule_sk,
+        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
+        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
+        MAX(IFF(c.logical_oper = 'OR', 1, 0)) AS has_or,          -- P5
+        COUNT(c.rule_sk)                      AS cond_cnt,        -- P6: 0 when no conditions
+        COUNT_IF(
+             (c.rule_fld_name = 'CSTM_SUPCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sup_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sup_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_SUBCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sub_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sub_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_CNTRY_RISK_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.cntry_desc   =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.cntry_desc   != NULLIF(c.rule_fld_value, ''))))
+        )                                     AS match_cnt        -- P4: NULL -> not counted
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c         -- LEFT: P6
+           ON c.rule_sk = r.rule_sk
+    CROSS JOIN combo cb                                           -- every rule tested on every combo
+    WHERE r.rule_stat = 'A'
+      AND r.schema_id IN (SELECT schema_id FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA)
+    GROUP BY r.schema_id, cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+             r.rule_sk, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc
+),
+-- (DT2) keep matching rules; first (_1) and last (_2, only when >1 match)  - P7
+rule_pick AS (
+    SELECT
+        schema_id, sup_desc_key, sub_desc_key, cntry_desc_key,
+        MIN_BY(rule_sup_desc, rule_sk)                          AS r1_sup,
+        MIN_BY(rule_sub_desc, rule_sk)                          AS r1_sub,
+        IFF(COUNT(*) > 1, MAX_BY(rule_sup_desc, rule_sk), NULL) AS rn_sup,
+        IFF(COUNT(*) > 1, MAX_BY(rule_sub_desc, rule_sk), NULL) AS rn_sub
+    FROM rule_eval
+    WHERE (has_or = 1 AND match_cnt > 0)
+       OR (has_or = 0 AND match_cnt = cond_cnt)
+    GROUP BY schema_id, sup_desc_key, sub_desc_key, cntry_desc_key
+),
+-- (DT3) active WLT custom row per schema + instrument  - P8, P9
+cstm_row AS (
+    SELECT
+        ncs.schema_id,
+        ncs.instr_id,
+        NULLIF(ncs.cstm_supcatg_code, '') AS cstm_supcatg_code,
+        NULLIF(ncs.cstm_supcatg_desc, '') AS cstm_supcatg_desc,
+        NULLIF(ncs.npf_supcatg_code,  '') AS npf_supcatg_code,
+        NULLIF(ncs.cstm_subcatg_code, '') AS cstm_subcatg_code,
+        NULLIF(ncs.cstm_subcatg_desc, '') AS cstm_subcatg_desc,
+        NULLIF(ncs.npf_subcatg_code,  '') AS npf_subcatg_code
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
+    WHERE ncs.rptg_type = 'WLT'
+      AND ncs.end_dt IS NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY ncs.schema_id, ncs.instr_id
+                               ORDER BY ncs.start_dt DESC) = 1
+),
+-- (FINAL) one row per npf_asst_typ_mgr call: customer schema x customer instrument
+calls AS (
+    SELECT
+        s.schema_id, s.cust_sk, s.schema_desc,
+        a.instr_id, a.iss_type,
+        a.std_sup_code, a.std_sub_code, a.std_sup_desc, a.std_sub_desc,
+        cr.schema_id AS cstm_hit,                                 -- NOT NULL => Path 1
+        cr.cstm_supcatg_code, cr.cstm_supcatg_desc, cr.npf_supcatg_code,
+        cr.cstm_subcatg_code, cr.cstm_subcatg_desc, cr.npf_subcatg_code,
+        rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
+    JOIN cust_instr ci ON ci.cust_sk  = s.cust_sk
+    JOIN asset_std  a  ON a.instr_id  = ci.instr_id
+                      AND EQUAL_NULL(a.iss_type, ci.iss_type)   -- NULL issue type kept (gets defaults)
+    LEFT JOIN cstm_row cr
+           ON cr.schema_id = s.schema_id
+          AND cr.instr_id  = a.instr_id
+    LEFT JOIN rule_pick rp
+           ON rp.schema_id      = s.schema_id
+          AND rp.sup_desc_key   = a.sup_desc_key
+          AND rp.sub_desc_key   = a.sub_desc_key
+          AND rp.cntry_desc_key = a.cntry_desc_key
+),
+out AS (
+    SELECT
+        schema_id, cust_sk, instr_id, iss_type, schema_desc,
+        std_sup_code AS supcatg_code,
+        std_sub_code AS subcatg_code,
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_supcatg_desc                   -- P8
+             ELSE COALESCE(rn_sup, r1_sup, std_sup_desc) END           AS supcatg_desc,   -- P7
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_subcatg_desc
+             ELSE COALESCE(rn_sub, r1_sub, std_sub_desc) END           AS subcatg_desc,
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_supcatg_code IS NULL, NVL(npf_supcatg_code, '') || '-S',
+                                                 cstm_supcatg_code        || '-C')
+             ELSE NVL(std_sup_code, '') || '-S' END                    AS cstm_supcatg_code,   -- P3
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_subcatg_code IS NULL, NVL(npf_subcatg_code, '') || '-S',
+                                                 cstm_subcatg_code        || '-C')
+             ELSE NVL(std_sup_code, '') || '-' || NVL(std_sub_code, '') || '-S' END AS cstm_subcatg_code
+    FROM calls
+)
+SELECT
+    schema_id,
+    cust_sk,
+    instr_id,
+    'WLT'        AS rptg_type,
+    iss_type,
+    supcatg_code,
+    subcatg_code,
+    supcatg_desc,
+    subcatg_desc,
+    cstm_supcatg_code,
+    cstm_subcatg_code,
+    supcatg_desc AS cstm_supcatg_desc,
+    subcatg_desc AS cstm_subcatg_desc,
+    schema_desc
+FROM out;
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TBL-VIEW_APPROACH_V3 stripComments:false
+CREATE TABLE IF NOT EXISTS DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL (
+    SCHEMA_ID          NUMBER,
+    CUST_SK            NUMBER,
+    INSTR_ID           VARCHAR,
+    RPTG_TYPE          VARCHAR,
+    ISS_TYPE           VARCHAR,
+    SUPCATG_CODE       VARCHAR,
+    SUBCATG_CODE       VARCHAR,
+    SUPCATG_DESC       VARCHAR,
+    SUBCATG_DESC       VARCHAR,
+    CSTM_SUPCATG_CODE  VARCHAR,
+    CSTM_SUBCATG_CODE  VARCHAR,
+    CSTM_SUPCATG_DESC  VARCHAR,
+    CSTM_SUBCATG_DESC  VARCHAR,
+    SCHEMA_DESC        VARCHAR,
+    LOAD_TS            TIMESTAMP_LTZ
+)
+COMMENT = 'Loaded by task WPA_CSTM_ASSET_SCHEMA_CATG_TSK from view WPA_CSTM_ASSET_SCHEMA_CATG_VW (MERGE + DELETE on SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE).';
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TBL-TRUNCATE-VIEW_APPROACH_V3 stripComments:false
+-- comment: one-time - rows loaded on the old key (no ISS_TYPE); next task run reloads fully
+TRUNCATE TABLE IF EXISTS DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL;
+
+-- changeset root:NPF_CSTM_RULE_MSTR_CATG_STRM-VIEW_APPROACH_V3 stripComments:false
+-- comment: requires CHANGE_TRACKING = TRUE on NPF_CSTM_RULE_MSTR
+CREATE STREAM IF NOT EXISTS DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM
+  ON TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK on rule master changes';
+
+-- changeset root:NPF_CSTM_RULE_COND_CATG_STRM-VIEW_APPROACH_V3 stripComments:false
+-- comment: requires CHANGE_TRACKING = TRUE on NPF_CSTM_RULE_COND
+CREATE STREAM IF NOT EXISTS DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM
+  ON TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK on rule condition changes';
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP-VIEW_APPROACH_V3 stripComments:false splitStatements:false runOnChange:true
+-- comment: MERGE + DELETE load; consumes the rule streams first
+CREATE OR REPLACE PROCEDURE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP()
+  RETURNS VARCHAR
+  LANGUAGE SQL
+  COMMENT = 'Delta load (MERGE + DELETE) of WPA_CSTM_ASSET_SCHEMA_CATG_TBL from WPA_CSTM_ASSET_SCHEMA_CATG_VW'
+  EXECUTE AS CALLER                                         -- must come after COMMENT
+AS
+$$
+DECLARE
+    v_ins_upd NUMBER DEFAULT 0;
+    v_del     NUMBER DEFAULT 0;
+BEGIN
+    -- 0) consume rule streams: a stream offset only moves when DML READS it in a
+    --    committed transaction. Target = session temp table, never gets rows.
+    --    (CREATE is DDL -> must run before BEGIN TRANSACTION, DDL auto-commits)
+    CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk NUMBER);
+    BEGIN TRANSACTION;
+    INSERT INTO DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM WHERE 1 = 0;
+    INSERT INTO DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM WHERE 1 = 0;
+    COMMIT;
+
+    -- a) stage
+    CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG AS
+    SELECT * FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_VW;
+
+    BEGIN TRANSACTION;
+
+    -- b) upsert
+    MERGE INTO DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
+    USING DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
+       ON  t.schema_id = s.schema_id
+       AND t.cust_sk   = s.cust_sk
+       AND t.instr_id  = s.instr_id
+       AND EQUAL_NULL(t.iss_type, s.iss_type)                -- ISS_TYPE is part of the key
+    WHEN MATCHED AND (   t.rptg_type         IS DISTINCT FROM s.rptg_type
+                      OR t.supcatg_code      IS DISTINCT FROM s.supcatg_code
+                      OR t.subcatg_code      IS DISTINCT FROM s.subcatg_code
+                      OR t.supcatg_desc      IS DISTINCT FROM s.supcatg_desc
+                      OR t.subcatg_desc      IS DISTINCT FROM s.subcatg_desc
+                      OR t.cstm_supcatg_code IS DISTINCT FROM s.cstm_supcatg_code
+                      OR t.cstm_subcatg_code IS DISTINCT FROM s.cstm_subcatg_code
+                      OR t.cstm_supcatg_desc IS DISTINCT FROM s.cstm_supcatg_desc
+                      OR t.cstm_subcatg_desc IS DISTINCT FROM s.cstm_subcatg_desc
+                      OR t.schema_desc       IS DISTINCT FROM s.schema_desc)
+    THEN UPDATE SET
+         rptg_type         = s.rptg_type,
+         supcatg_code      = s.supcatg_code,
+         subcatg_code      = s.subcatg_code,
+         supcatg_desc      = s.supcatg_desc,
+         subcatg_desc      = s.subcatg_desc,
+         cstm_supcatg_code = s.cstm_supcatg_code,
+         cstm_subcatg_code = s.cstm_subcatg_code,
+         cstm_supcatg_desc = s.cstm_supcatg_desc,
+         cstm_subcatg_desc = s.cstm_subcatg_desc,
+         schema_desc       = s.schema_desc,
+         load_ts           = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (schema_id, cust_sk, instr_id, rptg_type, iss_type,
+         supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
+         cstm_supcatg_code, cstm_subcatg_code, cstm_supcatg_desc, cstm_subcatg_desc,
+         schema_desc, load_ts)
+    VALUES
+        (s.schema_id, s.cust_sk, s.instr_id, s.rptg_type, s.iss_type,
+         s.supcatg_code, s.subcatg_code, s.supcatg_desc, s.subcatg_desc,
+         s.cstm_supcatg_code, s.cstm_subcatg_code, s.cstm_supcatg_desc, s.cstm_subcatg_desc,
+         s.schema_desc, CURRENT_TIMESTAMP());
+    v_ins_upd := SQLROWCOUNT;
+
+    -- c) remove keys the view no longer produces
+    DELETE FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL t
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_STG s
+        WHERE s.schema_id = t.schema_id
+          AND s.cust_sk   = t.cust_sk
+          AND s.instr_id  = t.instr_id
+          AND EQUAL_NULL(s.iss_type, t.iss_type));
+    v_del := SQLROWCOUNT;
+
+    COMMIT;
+    RETURN 'merged (ins+upd): ' || v_ins_upd || ', deleted: ' || v_del;
+EXCEPTION
+    WHEN OTHER THEN
+        ROLLBACK;
+        RAISE;                                   -- task run shows FAILED with the error
+END;
+$$;
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-SUSPEND-VIEW_APPROACH_V3 stripComments:false
+-- comment: a running (started) task can't be replaced cleanly; suspend before CREATE OR REPLACE
+ALTER TASK IF EXISTS DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK SUSPEND;
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-VIEW_APPROACH_V3 stripComments:false
+-- comment: serverless, every 3 minutes -> LOAD_SP
+CREATE OR REPLACE TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK
+  SCHEDULE = '3 MINUTES'
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'                  -- Snowflake sizes compute to finish within this
+  USER_TASK_TIMEOUT_MS = 21600000                           -- 6 hours
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'Every 3 min: WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP (view -> table delta load)'
+AS
+  CALL DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK-VIEW_APPROACH_V3 stripComments:false
+-- comment: serverless, triggered by the rule streams -> LOAD_SP
+CREATE OR REPLACE TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'                  -- Snowflake sizes compute to finish within this
+  USER_TASK_TIMEOUT_MS = 21600000
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'On rule table change: WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP (immediate refresh)'
+  WHEN SYSTEM$STREAM_HAS_DATA('DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_STRM')
+    OR SYSTEM$STREAM_HAS_DATA('DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_STRM')
+AS
+  CALL DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_LOAD_SP();
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_TSK-RESUME-VIEW_APPROACH_V3 stripComments:false
+ALTER TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TSK RESUME;
+
+-- changeset root:WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK-RESUME-VIEW_APPROACH_V3 stripComments:false
+ALTER TASK DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_RULE_TSK RESUME;
+*
+���� c9c7bad00a8f9acc28a6102ce91bbfdb
+��
+<CSTM Asset schema/Validation - CSTM Asset Schema Catg DY.sql��/* =============================================================================
+   VALIDATION  -  DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+   Checks every (SCHEMA_ID, INSTR_ID, ISS_TYPE, CUST_SK) row against an INDEPENDENT
+   re-implementation of Oracle npf_asst_typ_mgr (11-arg) + RULE_EVALUATION,
+   built straight from base tables (not from the WPA_CAS_* DTs):
+     - standard category from the POSITION / TRANSACTION issue type + NPF_ASSET_CATG + defaults
+     - country from NPF_ASSET.cntry_risk_dcde + NPF_DECODE('CNTRY')
+     - rules evaluated PER INSTRUMENT (DT evaluates per desc combo)
+   Grain (same as the DT) = each NPF_CUST_CSTM_SCHEMA (cust_sk, schema) x the
+   (instrument, issue type) pairs that cust_sk ever held (WPA_AC_POSITION, any date) or transacted (WPA_TRANSACTION)
+   (instrument attributes read straight from NPF_ASSET, as the Oracle proc does;
+   held/transacted instruments = the same set WPA_ASSET_DYN keeps).
+
+   Sections
+     0  Parameters
+     1  Build expected result (temp table) with Oracle SCENARIO tag
+     2  Structural checks (grain, duplicates, NULLs, code formats)
+     3  Full comparison DT vs expected  (per column, per scenario)
+     4  Scenario coverage + sample rows per scenario
+     5  CUST_SK consistency (same schema -> same values for every customer)
+     6  Optional: compare with old proc-loaded table WPA_CSTM_ASSET_SCHEMA_CATG
+
+   Scenarios (Oracle branch that produced the row)
+     P1-CC  custom row, cstm sup code + cstm sub code       -> sup -C, sub -C
+     P1-SC  custom row, cstm sup NULL, cstm sub present     -> sup -S, sub -C
+     P1-CS  custom row, cstm sup present, cstm sub NULL     -> sup -C, sub -S
+     P1-SS  custom row, both cstm codes NULL                -> sup -S, sub -S
+     P2-R1  no custom row, exactly 1 rule matched           -> rule desc
+     P2-RN  no custom row, >1 rule matched                  -> last rule desc (per column fallback)
+     P2-STD no custom row, no rule matched                  -> standard desc
+   Extra flags: DEFAULT_CATG (no NPF_ASSET_CATG mapping -> 30/20),
+                NO_CNTRY (country desc NULL), NULL_ISS_TYPE.
+   ============================================================================= */
+
+
+/* =============================================================================
+   0. Parameters
+   Set V_SCHEMA_ID to one schema for a fast run, or NULL for all schemas.
+   ============================================================================= */
+SET V_SCHEMA_ID = NULL;          -- e.g. SET V_SCHEMA_ID = 101;
+
+
+/* =============================================================================
+   1. Expected result (independent Oracle re-implementation)
+   ============================================================================= */
+CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED AS
+WITH
+hold AS (                                     -- customer positions (any date) + transactions
+    SELECT p.cust_sk, p.instr_id, NULLIF(p.ast_iss_type, '') AS iss_type   -- issue type from the position
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    WHERE p.instr_id IS NOT NULL AND p.cust_sk IS NOT NULL
+    UNION
+    SELECT t.cust_sk, t.instr_id, NULLIF(t.ast_iss_type, '') AS iss_type   -- ... and from the transaction
+    FROM DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
+    WHERE t.instr_id IS NOT NULL AND t.cust_sk IS NOT NULL
+),
+ast AS (                                      -- (instr, passed issue type) + NPF_ASSET country code
+    SELECT DISTINCT h.instr_id, h.iss_type, a.cntry_risk_dcde
+    FROM hold h
+    JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET a ON a.instr_id = h.instr_id   -- instr must exist in NPF_ASSET
+),
+std AS (                                      -- 6-arg npf_asst_typ_mgr + country lookup
+    SELECT
+        ast.instr_id,
+        ast.iss_type,
+        IFF(ac.iss_type IS NULL, 'Y', 'N')                                      AS default_catg,
+        IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
+        IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
+        IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
+        IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
+        NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
+    FROM ast
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+           ON ac.rptg_type = 'WLT' AND ac.iss_type = ast.iss_type
+    LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+           ON d.dcde_type = 'CNTRY' AND d.dcde_code = ast.cntry_risk_dcde
+),
+sch AS (
+    SELECT cust_sk, schema_id, schema_desc
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
+    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+),
+cs AS (                                       -- v_rec_cnt + cstm_asset_cursor
+    SELECT schema_id, instr_id,
+           NULLIF(cstm_supcatg_code, '') AS cstm_supcatg_code,
+           NULLIF(cstm_supcatg_desc, '') AS cstm_supcatg_desc,
+           NULLIF(npf_supcatg_code,  '') AS npf_supcatg_code,
+           NULLIF(cstm_subcatg_code, '') AS cstm_subcatg_code,
+           NULLIF(cstm_subcatg_desc, '') AS cstm_subcatg_desc,
+           NULLIF(npf_subcatg_code,  '') AS npf_subcatg_code
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA
+    WHERE rptg_type = 'WLT' AND end_dt IS NULL
+      AND ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id ORDER BY start_dt DESC) = 1
+),
+grid AS (                                     -- one row per npf_asst_typ_mgr call
+    SELECT s.cust_sk, s.schema_id, s.schema_desc, t.*
+    FROM sch s
+    JOIN hold h ON h.cust_sk  = s.cust_sk
+    JOIN std  t ON t.instr_id = h.instr_id AND EQUAL_NULL(t.iss_type, h.iss_type)
+),
+need_rules AS (                               -- (schema, instr, iss) that go to RULE_EVALUATION
+    SELECT DISTINCT g.schema_id, g.instr_id, NVL(g.iss_type, '#NULL#') AS iss_key, g.std_sup_desc, g.std_sub_desc, g.cntry_desc
+    FROM grid g
+    WHERE NOT EXISTS (SELECT 1 FROM cs WHERE cs.schema_id = g.schema_id AND cs.instr_id = g.instr_id)
+),
+cond_eval AS (                                -- one row per (schema, instr, rule, condition)
+    SELECT
+        n.schema_id, n.instr_id, n.iss_key, r.rule_sk,
+        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
+        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
+        c.cond_sk,
+        c.logical_oper,
+        CASE c.rule_fld_name
+             WHEN 'CSTM_SUPCATG_DESC'    THEN n.std_sup_desc
+             WHEN 'CSTM_SUBCATG_DESC'    THEN n.std_sub_desc
+             WHEN 'CSTM_CNTRY_RISK_DESC' THEN n.cntry_desc
+        END                                  AS fld_val,
+        c.rule_fld_name,
+        c.rule_oper,
+        NULLIF(c.rule_fld_value, '')         AS rule_fld_value
+    FROM need_rules n
+    JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+      ON r.schema_id = n.schema_id AND r.rule_stat = 'A'
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c
+      ON c.rule_sk = r.rule_sk
+),
+rule_match AS (                               -- Oracle per-rule decision
+    SELECT schema_id, instr_id, iss_key, rule_sk, rule_sup_desc, rule_sub_desc,
+           BOOLOR_AGG(COALESCE(logical_oper = 'OR', FALSE))                      AS has_or,
+           COUNT(cond_sk)                                                        AS n_cond,
+           COUNT_IF(COALESCE(
+               CASE WHEN rule_fld_name IN ('CSTM_SUPCATG_DESC','CSTM_SUBCATG_DESC','CSTM_CNTRY_RISK_DESC')
+                    THEN CASE rule_oper
+                              WHEN 'EQUAL'    THEN fld_val =  rule_fld_value
+                              WHEN 'NOTEQUAL' THEN fld_val <> rule_fld_value
+                         END
+               END, FALSE))                                                      AS n_true
+    FROM cond_eval
+    GROUP BY schema_id, instr_id, iss_key, rule_sk, rule_sup_desc, rule_sub_desc
+),
+matched AS (
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id, iss_key ORDER BY rule_sk ASC)  AS rn_first,
+           ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id, iss_key ORDER BY rule_sk DESC) AS rn_last,
+           COUNT(*)     OVER (PARTITION BY schema_id, instr_id, iss_key)              AS n_match
+    FROM rule_match
+    WHERE (has_or AND n_true > 0) OR (NOT has_or AND n_true = n_cond)
+),
+rule_out AS (                                 -- desc_1 = first, desc_2 = last (only if >1)
+    SELECT schema_id, instr_id, iss_key, MAX(n_match) AS n_match,
+           MAX(IFF(rn_first = 1, rule_sup_desc, NULL))                 AS d1_sup,
+           MAX(IFF(rn_first = 1, rule_sub_desc, NULL))                 AS d1_sub,
+           MAX(IFF(rn_last  = 1 AND n_match > 1, rule_sup_desc, NULL)) AS d2_sup,
+           MAX(IFF(rn_last  = 1 AND n_match > 1, rule_sub_desc, NULL)) AS d2_sub
+    FROM matched
+    GROUP BY schema_id, instr_id, iss_key
+)
+SELECT
+    s.schema_id,
+    s.cust_sk,
+    t.instr_id,
+    'WLT'                                     AS rptg_type,
+    t.iss_type,
+    -- OUT: v_ast_supcatg_code_a / v_ast_subcatg_code_a (always standard)
+    t.std_sup_code                            AS supcatg_code,
+    t.std_sub_code                            AS subcatg_code,
+    -- OUT: v_ast_supcatg_desc_a / v_ast_subcatg_desc_a
+    CASE WHEN cs.schema_id IS NOT NULL THEN cs.cstm_supcatg_desc
+         ELSE COALESCE(ro.d2_sup, ro.d1_sup, t.std_sup_desc) END        AS supcatg_desc,
+    CASE WHEN cs.schema_id IS NOT NULL THEN cs.cstm_subcatg_desc
+         ELSE COALESCE(ro.d2_sub, ro.d1_sub, t.std_sub_desc) END        AS subcatg_desc,
+    -- OUT: v_cstm_supcatg_code_a / v_cstm_subcatg_code_a (Oracle 4-branch matrix, literal)
+    CASE
+      WHEN cs.schema_id IS NULL                                                    THEN NVL(t.std_sup_code,'') || '-S'
+      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NOT NULL   THEN NVL(cs.npf_supcatg_code,'')  || '-S'
+      WHEN cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NULL       THEN cs.cstm_supcatg_code         || '-C'
+      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NULL       THEN NVL(cs.npf_supcatg_code,'')  || '-S'
+      ELSE                                                                              cs.cstm_supcatg_code         || '-C'
+    END                                                                 AS cstm_supcatg_code,
+    CASE
+      WHEN cs.schema_id IS NULL                                                    THEN NVL(t.std_sup_code,'') || '-' || NVL(t.std_sub_code,'') || '-S'
+      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NOT NULL   THEN cs.cstm_subcatg_code         || '-C'
+      WHEN cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NULL       THEN NVL(cs.npf_subcatg_code,'')  || '-S'
+      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NULL       THEN NVL(cs.npf_subcatg_code,'')  || '-S'
+      ELSE                                                                              cs.cstm_subcatg_code         || '-C'
+    END                                                                 AS cstm_subcatg_code,
+    s.schema_desc,
+    -- Scenario tags
+    CASE
+      WHEN cs.schema_id IS NOT NULL AND cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NOT NULL THEN 'P1-CC'
+      WHEN cs.schema_id IS NOT NULL AND cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NOT NULL THEN 'P1-SC'
+      WHEN cs.schema_id IS NOT NULL AND cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NULL     THEN 'P1-CS'
+      WHEN cs.schema_id IS NOT NULL                                                                           THEN 'P1-SS'
+      WHEN ro.n_match = 1                                                                                     THEN 'P2-R1'
+      WHEN ro.n_match > 1                                                                                     THEN 'P2-RN'
+      ELSE                                                                                                         'P2-STD'
+    END                                                                 AS scenario,
+    t.default_catg,
+    IFF(t.cntry_desc IS NULL, 'Y', 'N')                                 AS no_cntry,
+    IFF(t.iss_type   IS NULL, 'Y', 'N')                                 AS null_iss_type,
+    NVL(ro.n_match, 0)                                                  AS n_rules_matched
+FROM grid t
+JOIN sch s         ON s.cust_sk = t.cust_sk AND s.schema_id = t.schema_id
+LEFT JOIN cs       ON cs.schema_id = s.schema_id AND cs.instr_id = t.instr_id
+LEFT JOIN rule_out ro ON ro.schema_id = s.schema_id AND ro.instr_id = t.instr_id
+                     AND ro.iss_key = NVL(t.iss_type, '#NULL#');
+
+
+/* =============================================================================
+   2. Structural checks on the DT
+   ============================================================================= */
+
+-- 2.1 Row counts: DT vs expected (cust-schema rows x that customer's holdings)
+SELECT
+  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID))                     AS dt_rows,
+  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED)                  AS expected_rows;
+
+-- 2.1b Same, per customer (spot the customers whose counts differ; expect 0 rows)
+SELECT COALESCE(d.schema_id, e.schema_id) AS schema_id,
+       COALESCE(d.cust_sk,   e.cust_sk)   AS cust_sk,
+       d.cnt AS dt_rows, e.cnt AS expected_rows
+FROM (SELECT schema_id, cust_sk, COUNT(*) cnt
+      FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+      WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+      GROUP BY 1,2) d
+FULL OUTER JOIN
+     (SELECT schema_id, cust_sk, COUNT(*) cnt
+      FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED GROUP BY 1,2) e
+  ON e.schema_id = d.schema_id AND e.cust_sk = d.cust_sk
+WHERE NOT EQUAL_NULL(d.cnt, e.cnt)
+ORDER BY 1,2
+LIMIT 100;
+
+-- 2.2 Duplicate keys in DT (expect 0)
+SELECT schema_id, instr_id, cust_sk, iss_type, COUNT(*) AS cnt
+FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+GROUP BY 1,2,3,4 HAVING COUNT(*) > 1
+LIMIT 100;
+
+-- 2.3 NULL / format checks (each count should be 0 unless explained by source data)
+SELECT
+  COUNT_IF(supcatg_code IS NULL)                                   AS null_supcatg_code,
+  COUNT_IF(subcatg_code IS NULL)                                   AS null_subcatg_code,
+  COUNT_IF(supcatg_desc IS NULL)                                   AS null_supcatg_desc,
+  COUNT_IF(subcatg_desc IS NULL)                                   AS null_subcatg_desc,
+  COUNT_IF(cstm_supcatg_code IS NULL)                              AS null_cstm_sup_code,
+  COUNT_IF(cstm_subcatg_code IS NULL)                              AS null_cstm_sub_code,
+  COUNT_IF(NOT (cstm_supcatg_code LIKE '%-S' OR cstm_supcatg_code LIKE '%-C')) AS bad_sup_suffix,
+  COUNT_IF(NOT (cstm_subcatg_code LIKE '%-S' OR cstm_subcatg_code LIKE '%-C')) AS bad_sub_suffix,
+  COUNT_IF(cstm_supcatg_desc IS DISTINCT FROM supcatg_desc)        AS cstm_sup_desc_ne_desc,
+  COUNT_IF(cstm_subcatg_desc IS DISTINCT FROM subcatg_desc)        AS cstm_sub_desc_ne_desc,
+  COUNT_IF(rptg_type <> 'WLT')                                     AS non_wlt
+FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID);
+
+-- 2.4 Rule/standard rows: sup code must start the sub code ('<sup>-<sub>-S')
+SELECT COUNT(*) AS bad_fallback_code_pattern
+FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+  AND cstm_subcatg_code LIKE '%-%-S'
+  AND (cstm_supcatg_code <> supcatg_code || '-S'
+       OR cstm_subcatg_code <> supcatg_code || '-' || subcatg_code || '-S');
+
+
+/* =============================================================================
+   3. Full comparison DT vs expected
+   ============================================================================= */
+CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF AS
+SELECT
+    COALESCE(e.schema_id, d.schema_id) AS schema_id,
+    COALESCE(e.cust_sk,   d.cust_sk)   AS cust_sk,
+    COALESCE(e.instr_id,  d.instr_id)  AS instr_id,
+    COALESCE(e.iss_type,  d.iss_type)  AS iss_type,
+    e.scenario, e.default_catg, e.no_cntry, e.null_iss_type, e.n_rules_matched,
+    CASE WHEN d.instr_id IS NULL THEN 'MISSING_IN_DT'
+         WHEN e.instr_id IS NULL THEN 'EXTRA_IN_DT'
+         ELSE 'BOTH' END                                                AS presence,
+    NOT EQUAL_NULL(e.iss_type,          d.iss_type)                     AS diff_iss_type,
+    NOT EQUAL_NULL(e.supcatg_code,      d.supcatg_code)                 AS diff_sup_code,
+    NOT EQUAL_NULL(e.subcatg_code,      d.subcatg_code)                 AS diff_sub_code,
+    NOT EQUAL_NULL(e.supcatg_desc,      d.supcatg_desc)                 AS diff_sup_desc,
+    NOT EQUAL_NULL(e.subcatg_desc,      d.subcatg_desc)                 AS diff_sub_desc,
+    NOT EQUAL_NULL(e.cstm_supcatg_code, d.cstm_supcatg_code)            AS diff_cstm_sup_code,
+    NOT EQUAL_NULL(e.cstm_subcatg_code, d.cstm_subcatg_code)            AS diff_cstm_sub_code,
+    NOT EQUAL_NULL(e.schema_desc,       d.schema_desc)                  AS diff_schema_desc,
+    e.supcatg_code      AS exp_sup_code,      d.supcatg_code      AS dt_sup_code,
+    e.subcatg_code      AS exp_sub_code,      d.subcatg_code      AS dt_sub_code,
+    e.supcatg_desc      AS exp_sup_desc,      d.supcatg_desc      AS dt_sup_desc,
+    e.subcatg_desc      AS exp_sub_desc,      d.subcatg_desc      AS dt_sub_desc,
+    e.cstm_supcatg_code AS exp_cstm_sup_code, d.cstm_supcatg_code AS dt_cstm_sup_code,
+    e.cstm_subcatg_code AS exp_cstm_sub_code, d.cstm_subcatg_code AS dt_cstm_sub_code
+FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED e
+FULL OUTER JOIN (
+    SELECT * FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+) d
+  ON d.schema_id = e.schema_id AND d.cust_sk = e.cust_sk AND d.instr_id = e.instr_id
+ AND EQUAL_NULL(d.iss_type, e.iss_type);
+
+-- 3.1 Overall result: all diff columns should be 0, presence only 'BOTH'
+SELECT presence,
+       COUNT(*)                       AS rows_cnt,
+       COUNT_IF(diff_iss_type)        AS iss_type,
+       COUNT_IF(diff_sup_code)        AS sup_code,
+       COUNT_IF(diff_sub_code)        AS sub_code,
+       COUNT_IF(diff_sup_desc)        AS sup_desc,
+       COUNT_IF(diff_sub_desc)        AS sub_desc,
+       COUNT_IF(diff_cstm_sup_code)   AS cstm_sup_code,
+       COUNT_IF(diff_cstm_sub_code)   AS cstm_sub_code,
+       COUNT_IF(diff_schema_desc)     AS schema_desc
+FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF
+GROUP BY presence;
+
+-- 3.2 Mismatches by scenario (which Oracle branch is wrong)
+SELECT scenario, default_catg, no_cntry, null_iss_type,
+       COUNT(*) AS rows_cnt,
+       COUNT_IF(diff_sup_code OR diff_sub_code)           AS std_code_diff,
+       COUNT_IF(diff_sup_desc OR diff_sub_desc)           AS desc_diff,
+       COUNT_IF(diff_cstm_sup_code OR diff_cstm_sub_code) AS cstm_code_diff
+FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF
+WHERE presence = 'BOTH'
+GROUP BY 1,2,3,4
+ORDER BY 1,2,3,4;
+
+-- 3.3 Mismatch detail (first 200)
+SELECT schema_id, cust_sk, instr_id, iss_type, scenario, presence, n_rules_matched,
+       exp_sup_code, dt_sup_code, exp_sub_code, dt_sub_code,
+       exp_sup_desc, dt_sup_desc, exp_sub_desc, dt_sub_desc,
+       exp_cstm_sup_code, dt_cstm_sup_code, exp_cstm_sub_code, dt_cstm_sub_code
+FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF
+WHERE presence <> 'BOTH'
+   OR diff_iss_type OR diff_sup_code OR diff_sub_code OR diff_sup_desc OR diff_sub_desc
+   OR diff_cstm_sup_code OR diff_cstm_sub_code OR diff_schema_desc
+ORDER BY scenario, schema_id, instr_id
+LIMIT 200;
+
+
+/* =============================================================================
+   4. Scenario coverage + samples
+   ============================================================================= */
+
+-- 4.1 Coverage: every scenario should have rows (a 0 means that path is untested)
+WITH s AS (
+    SELECT column1 AS scenario FROM VALUES
+      ('P1-CC'),('P1-SC'),('P1-CS'),('P1-SS'),('P2-R1'),('P2-RN'),('P2-STD')
+)
+SELECT s.scenario,
+       COUNT(e.instr_id)                       AS rows_cnt,
+       COUNT(DISTINCT e.schema_id)             AS schemas,
+       COUNT(DISTINCT e.instr_id)              AS instruments,
+       COUNT_IF(e.default_catg  = 'Y')         AS with_default_catg,
+       COUNT_IF(e.no_cntry      = 'Y')         AS with_no_cntry,
+       COUNT_IF(e.null_iss_type = 'Y')         AS with_null_iss_type
+FROM s
+LEFT JOIN DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED e ON e.scenario = s.scenario
+GROUP BY s.scenario
+ORDER BY s.scenario;
+
+-- 4.2 Three sample rows per scenario: DT values side by side with expected
+SELECT x.scenario, x.schema_id, x.cust_sk, x.instr_id, x.n_rules_matched,
+       x.exp_sup_code, x.dt_sup_code, x.exp_sub_code, x.dt_sub_code,
+       x.exp_sup_desc, x.dt_sup_desc, x.exp_sub_desc, x.dt_sub_desc,
+       x.exp_cstm_sup_code, x.dt_cstm_sup_code, x.exp_cstm_sub_code, x.dt_cstm_sub_code
+FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF x
+WHERE x.presence = 'BOTH'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY x.scenario ORDER BY x.schema_id, x.instr_id) <= 3
+ORDER BY x.scenario, x.schema_id, x.instr_id;
+
+-- 4.3 Trace a P2-RN row: which rules matched, in RULE_SK order (pick ids from 4.2)
+-- SET V_TRACE_SCHEMA = <schema_id>;  SET V_TRACE_INSTR = '<instr_id>';
+-- SELECT r.rule_sk, r.rule_name, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc,
+--        c.cond_order, c.logical_oper, c.rule_fld_name, c.rule_oper, c.rule_fld_value
+-- FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+-- LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c ON c.rule_sk = r.rule_sk
+-- WHERE r.schema_id = $V_TRACE_SCHEMA AND r.rule_stat = 'A'
+-- ORDER BY r.rule_sk, c.cond_order;
+
+
+/* =============================================================================
+   5. CUST_SK consistency
+   p_cust_sk is unused by the proc -> all customers sharing a schema must get
+   identical values for the same instrument (expect 0 rows).
+   ============================================================================= */
+SELECT schema_id, instr_id, iss_type,
+       COUNT(DISTINCT cust_sk) AS customers,
+       COUNT(DISTINCT HASH(supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
+                           cstm_supcatg_code, cstm_subcatg_code)) AS distinct_results
+FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+GROUP BY schema_id, instr_id, iss_type
+HAVING COUNT(DISTINCT HASH(supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
+                           cstm_supcatg_code, cstm_subcatg_code)) > 1
+LIMIT 100;
+
+
+/* =============================================================================
+   6. Optional: compare with the old proc-loaded table
+   Old table key has no CUST_SK, so compare on (schema, instr, rptg) and only
+   for instruments present in both. Differences here can be old-proc gaps
+   (stale rows, zero-condition rule handling), not DT errors - confirm with 3.x.
+   ============================================================================= */
+WITH dt AS (
+    SELECT DISTINCT schema_id, instr_id, rptg_type, iss_type, supcatg_code, subcatg_code,
+           supcatg_desc, subcatg_desc, cstm_supcatg_code, cstm_subcatg_code
+    FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+),
+old AS (
+    SELECT DISTINCT schema_id, instr_id, rptg_type, iss_type, supcatg_code, subcatg_code,
+           supcatg_desc, subcatg_desc, cstm_supcatg_code, cstm_subcatg_code
+    FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG
+    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
+      AND instr_id IN (SELECT instr_id FROM dt)
+)
+SELECT 'ONLY_IN_OLD' AS side, * FROM (SELECT * FROM old EXCEPT SELECT * FROM dt)
+UNION ALL
+SELECT 'ONLY_IN_DT'  AS side, * FROM (
+    SELECT * FROM dt
+    WHERE (schema_id, instr_id) IN (SELECT schema_id, instr_id FROM old)
+    EXCEPT
+    SELECT * FROM old)
+LIMIT 200;
+*
+���� a19c7f0e9254288d6c5b887fd770e3ea
+��
+?CSTM Asset schema/CSTM Asset Schema Catg DT - Oracle Parity.sql��/* =============================================================================
+   DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY  -  Dynamic Tables (DEV)
+   Built directly from Oracle npf_common_pkg.npf_asst_typ_mgr (11-arg)
+   + npf_asst_typ_mgr (6-arg) + NPF_CUST_SCHEMA_RULE_EVALUATION_PKG.RULE_EVALUATION
+   Reference: Oracle_Asset_Type_Manager_Logic.md
+
+   Grain : one row per NPF_CUST_CSTM_SCHEMA (CUST_SK, SCHEMA_ID) x (instrument,
+           ISSUE TYPE) ever HELD (any date) or TRANSACTED by that CUST_SK,
+           RPTG_TYPE = 'WLT'. Issue type from the position / transaction row.
+           Unique key: SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE (same as View + Task)
+           (= one npf_asst_typ_mgr call per customer holding)
+   Graph :
+     DT4 WPA_CAS_CUST_INSTR_DYN  ◀─ WPA_AC_POSITION + WPA_TRANSACTION (all dates)
+        │  (cust_sk, instr, issue type)            created FIRST
+        ▼  + WPA_ASSET_DYN (country code) + NPF_ASSET_CATG (WLT) + NPF_DECODE (CNTRY)
+     DT1 WPA_CAS_ASSET_STD_DYN    (6-arg proc + country)  1 row / (instr, issue type)
+        ├──────────────────────────────┐
+        ▼                              │
+     DT2 WPA_CAS_RULE_PICK_DYN         │   ◀─ NPF_CSTM_RULE_MSTR / NPF_CSTM_RULE_COND
+        (RULE_EVALUATION)              │
+        │   DT3 WPA_CAS_CSTM_ROW_DYN   │   ◀─ NPF_CSTM_SCHEMA
+        │      (v_rec_cnt + cursor)    │
+        │      │   DT4 (again, as row driver)   │
+        ▼      ▼                       ▼        ▼
+     FINAL WPA_CSTM_ASSET_SCHEMA_CATG_DY = NPF_CUST_CSTM_SCHEMA ⋈ DT4 (cust_sk) ⋈ DT1 (instr, iss_type)
+                                         ⟕ DT3 (custom row?) ⟕ DT2 (rule match?)
+
+   Create order : DT4 -> DT1 -> DT2 -> DT3 -> FINAL.
+   Refresh modes: DT1 ADAPTIVE, DT2 INCREMENTAL, DT3 INCREMENTAL,
+                  DT4 ADAPTIVE (append-only pairs), FINAL ADAPTIVE.
+
+   Oracle parity rules applied:
+     P1  Defaults from package spec: '30' / '20' / 'Other Assets' / 'Miscellaneous'
+         (applied in DT1 only when no NPF_ASSET_CATG row exists, as Oracle FETCH).
+     P2  Oracle '' = NULL            -> NULLIF(col,'') on every text input.
+     P3  Oracle CONCAT(NULL,'x')='x' -> NVL(col,'') || 'x'.
+     P4  NULL comparisons never match (EQUAL and NOTEQUAL) - native in Snowflake too.
+     P5  Any condition with LOGICAL_OPER='OR' -> rule = OR, else AND.
+     P6  Active rule with ZERO conditions MATCHES (0 = 0, has_OR false).
+     P7  1 match -> that rule; >1 -> last (highest RULE_SK); COALESCE per column
+         (last, first, standard).
+     P8  Custom row: standard codes, custom desc as-is (even NULL), -C/-S codes.
+     P9  Several active custom rows: Oracle order undefined -> latest START_DT kept.
+     P10 p_cust_sk is not used by the proc -> same values for every CUST_SK of a
+         schema; CUST_SK only decides WHICH instruments get a row (its holdings).
+     P11 Rule result codes and country outputs are not used (as in Oracle).
+
+   Environment : DEV. NPF_* + WPA_ASSET_DYN from DEV_WPA_ASSET_DB.CORE, NPF_DECODE from
+                 DEV_WPA_COMMON_UTIL_DB.CORE, positions from
+                 DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION + DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION, warehouse DEV_ADHOC_ANALYSIS.
+                 For UAT2: replace DEV_ -> UAT2_ and the warehouse name.
+   NOT compiled here - DEV databases not visible from this session.
+   ============================================================================= */
+
+
+/* -----------------------------------------------------------------------------
+   0. Pre-reqs
+   ----------------------------------------------------------------------------- */
+-- Change tracking on base tables read directly by the DTs
+-- (WPA_ASSET_DYN is a dynamic table - no change-tracking ALTER needed)
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG        SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE      SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA  SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA       SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR    SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND    SET CHANGE_TRACKING = TRUE;
+-- ALTER TABLE DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION    SET CHANGE_TRACKING = TRUE;   -- skip if it is a DT
+-- ALTER TABLE DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION  SET CHANGE_TRACKING = TRUE;   -- skip if it is a DT
+
+-- Final DT is named WPA_CSTM_ASSET_SCHEMA_CATG_DY, so the existing proc-loaded
+-- table WPA_CSTM_ASSET_SCHEMA_CATG is left untouched (parallel run / comparison).
+
+
+/* -----------------------------------------------------------------------------
+   DT4  WPA_CAS_CUST_INSTR_DYN   (created FIRST - DT1 reads it)
+   = which instrument + ISSUE TYPE each customer has -> drives which rows the
+     final DT has ("every schema x the customer's own instruments").
+   Holdings = every (cust_sk, instr_id, iss_type) the customer EVER had a
+   position in (any CALENDAR_DATE) or EVER transacted. No date filter:
+   latest-date-only was ruled out because it misses instruments.
+   ISS_TYPE comes from the source row (AST_ISS_TYPE on position / transaction):
+   one instrument can carry several issue types, each with its own category,
+   so each is a separate row (same as the View + Task version).
+   UNION ALL + outer GROUP BY (not UNION) keeps the DT incrementally refreshable;
+   new positions / transactions only add rows, so refreshes stay small.
+   CUST_SK stays here (not in DT1) so DT1 stays 1 row per (instrument, issue
+   type) and customer churn doesn't cascade into DT1 -> DT2.
+   ----------------------------------------------------------------------------- */
+create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN(
+  CUST_SK,
+  INSTR_ID,
+  ISS_TYPE
+) target_lag = DOWNSTREAM refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+ as
+WITH src AS (
+    SELECT p.cust_sk, p.instr_id, NULLIF(p.ast_iss_type, '') AS iss_type   -- positions, any date
+    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    WHERE p.instr_id IS NOT NULL
+      AND p.cust_sk  IS NOT NULL
+    UNION ALL
+    SELECT t.cust_sk, t.instr_id, NULLIF(t.ast_iss_type, '') AS iss_type   -- transactions; confirm column name
+    FROM DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
+    WHERE t.instr_id IS NOT NULL
+      AND t.cust_sk  IS NOT NULL
+)
+SELECT cust_sk, instr_id, iss_type
+FROM src
+GROUP BY cust_sk, instr_id, iss_type;
+
+
+/* -----------------------------------------------------------------------------
+   DT1  WPA_CAS_ASSET_STD_DYN
+   = npf_asst_typ_mgr 6-arg (standard category, defaults when no mapping)
+     + country lookup of the 11-arg ELSE branch (country-of-risk description).
+   Grain: 1 row per (INSTR_ID, ISS_TYPE) actually held/transacted (from DT4).
+   The 6-arg proc is called with the passed issue type -> the POSITION /
+   TRANSACTION issue type drives the category, not NPF_ASSET.ISS_TYPE.
+   Country code from the existing WPA_ASSET_DYN; inner join = instrument must
+   exist in NPF_ASSET (as in Oracle). Its own category/country desc columns are
+   NOT used; the Oracle lookups are joined below.
+   Top-level GROUP BY de-duplicates DT4's per-customer rows (incremental-friendly).
+     - category : LEFT JOIN NPF_ASSET_CATG (RPTG_TYPE='WLT') on the passed issue
+                  type; defaults only when no mapping row exists (Oracle FETCH)
+     - country  : LEFT JOIN NPF_DECODE (DCDE_TYPE='CNTRY'); NULL when not found
+   ----------------------------------------------------------------------------- */
+create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN(
+  INSTR_ID,
+  ISS_TYPE,
+  STD_SUP_CODE,
+  STD_SUB_CODE,
+  STD_SUP_DESC,
+  STD_SUB_DESC,
+  CNTRY_DESC,
+  SUP_DESC_KEY,
+  SUB_DESC_KEY,
+  CNTRY_DESC_KEY
+) target_lag = DOWNSTREAM refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+ as
+SELECT
+    instr_id, iss_type,
+    std_sup_code, std_sub_code, std_sup_desc, std_sub_desc, cntry_desc,
+    NVL(std_sup_desc, '#NULL#') AS sup_desc_key,
+    NVL(std_sub_desc, '#NULL#') AS sub_desc_key,
+    NVL(cntry_desc,   '#NULL#') AS cntry_desc_key
+FROM (
+    SELECT
+        ci.instr_id,
+        ci.iss_type,
+        -- FETCH overwrites all 4 defaults when a mapping row exists (even NULL values)
+        IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
+        IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
+        IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
+        IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
+        NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
+    FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci         -- (instr, issue type) in use
+    JOIN DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN a                   -- instr must exist in NPF_ASSET
+      ON a.instr_id = ci.instr_id
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+           ON ac.rptg_type = 'WLT'
+          AND ac.iss_type  = ci.iss_type                         -- position / txn issue type
+    LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+           ON d.dcde_type = 'CNTRY'
+          AND d.dcde_code = a.cntry_risk_dcde
+)
+GROUP BY ALL;                                                     -- 1 row per (instr, issue type)
+
+
+/* -----------------------------------------------------------------------------
+   DT2  WPA_CAS_RULE_PICK_DYN
+   = RULE_EVALUATION(schema, std_sup_desc, std_sub_desc, cntry_desc)
+   Flow inside this DT:
+     combo      : DISTINCT (std_sup_desc, std_sub_desc, cntry_desc) from DT1
+     rule_eval  : active rules x combo -> per-rule cond / match counts
+     final SELECT: keep matched rules, pick first (R1) and last (RN) per combo
+   Evaluated once per (schema, distinct desc combo) - inputs are only these
+   three values, so the result is identical to calling it per instrument.
+   Only combos with >= 1 matching rule are stored; others fall back to std.
+   ----------------------------------------------------------------------------- */
+create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_RULE_PICK_DYN(
+  SCHEMA_ID,
+  SUP_DESC_KEY,
+  SUB_DESC_KEY,
+  CNTRY_DESC_KEY,
+  MATCHED_RULE_CNT,
+  R1_SUP,
+  R1_SUB,
+  RN_SUP,
+  RN_SUB
+) target_lag = DOWNSTREAM refresh_mode = INCREMENTAL initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+ as
+WITH combo AS (
+    SELECT std_sup_desc, std_sub_desc, cntry_desc,
+           sup_desc_key, sub_desc_key, cntry_desc_key
+    FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN
+    GROUP BY std_sup_desc, std_sub_desc, cntry_desc,
+             sup_desc_key, sub_desc_key, cntry_desc_key
+),
+rule_eval AS (
+    SELECT
+        r.schema_id,
+        cb.sup_desc_key,
+        cb.sub_desc_key,
+        cb.cntry_desc_key,
+        r.rule_sk,
+        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
+        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
+        MAX(IFF(c.logical_oper = 'OR', 1, 0)) AS has_or,          -- P5
+        COUNT(c.rule_sk)                      AS cond_cnt,        -- 0 when no conditions
+        COUNT_IF(
+             (c.rule_fld_name = 'CSTM_SUPCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sup_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sup_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_SUBCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sub_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sub_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_CNTRY_RISK_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.cntry_desc   =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.cntry_desc   != NULLIF(c.rule_fld_value, ''))))
+        )                                     AS match_cnt        -- P4: NULL -> not counted
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c          -- LEFT: P6
+           ON c.rule_sk = r.rule_sk
+    CROSS JOIN combo cb
+    WHERE r.rule_stat = 'A'
+    GROUP BY r.schema_id, cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+             r.rule_sk, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc
+)
+SELECT
+    schema_id,
+    sup_desc_key,
+    sub_desc_key,
+    cntry_desc_key,
+    COUNT(*)                                                AS matched_rule_cnt,
+    MIN_BY(rule_sup_desc, rule_sk)                          AS r1_sup,   -- first match (_1)
+    MIN_BY(rule_sub_desc, rule_sk)                          AS r1_sub,
+    IFF(COUNT(*) > 1, MAX_BY(rule_sup_desc, rule_sk), NULL) AS rn_sup,   -- last match (_2)
+    IFF(COUNT(*) > 1, MAX_BY(rule_sub_desc, rule_sk), NULL) AS rn_sub
+FROM rule_eval
+WHERE (has_or = 1 AND match_cnt > 0)
+   OR (has_or = 0 AND match_cnt = cond_cnt)
+GROUP BY schema_id, sup_desc_key, sub_desc_key, cntry_desc_key;
+
+
+/* -----------------------------------------------------------------------------
+   DT3  WPA_CAS_CSTM_ROW_DYN
+   = v_rec_cnt > 0 check + cstm_asset_cursor (active row, END_DT IS NULL).
+   Instrument-exists check of the cursor (join NPF_ASSET) is satisfied in the
+   final DT because instruments come from DT1.
+   QUALIFY is a safeguard only: no duplicate active rows exist today.
+   ----------------------------------------------------------------------------- */
+create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN(
+  SCHEMA_ID,
+  INSTR_ID,
+  RPTG_TYPE,
+  CSTM_SUPCATG_CODE,
+  CSTM_SUPCATG_DESC,
+  NPF_SUPCATG_CODE,
+  CSTM_SUBCATG_CODE,
+  CSTM_SUBCATG_DESC,
+  NPF_SUBCATG_CODE
+) target_lag = DOWNSTREAM refresh_mode = INCREMENTAL initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+ as
+SELECT
+    ncs.schema_id,
+    ncs.instr_id,
+    ncs.rptg_type,
+    NULLIF(ncs.cstm_supcatg_code, '') AS cstm_supcatg_code,
+    NULLIF(ncs.cstm_supcatg_desc, '') AS cstm_supcatg_desc,
+    NULLIF(ncs.npf_supcatg_code,  '') AS npf_supcatg_code,
+    NULLIF(ncs.cstm_subcatg_code, '') AS cstm_subcatg_code,
+    NULLIF(ncs.cstm_subcatg_desc, '') AS cstm_subcatg_desc,
+    NULLIF(ncs.npf_subcatg_code,  '') AS npf_subcatg_code
+FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
+WHERE ncs.rptg_type = 'WLT'
+  AND ncs.end_dt IS NULL
+QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY ncs.schema_id, ncs.instr_id, ncs.rptg_type
+            ORDER BY ncs.start_dt DESC) = 1;                       -- P9
+
+
+/* -----------------------------------------------------------------------------
+   FINAL  WPA_CSTM_ASSET_SCHEMA_CATG_DY
+   = npf_asst_typ_mgr 11-arg, for every (cust_sk, schema) x instrument the
+     customer holds (DT4).
+     Path 1 (IF v_rec_cnt <> 0): custom row
+     Path 2 (ELSE)             : RULE_EVALUATION result / standard
+   OUT param mapping:
+     v_ast_supcatg_code_a  -> SUPCATG_CODE      v_ast_subcatg_code_a  -> SUBCATG_CODE
+     v_ast_supcatg_desc_a  -> SUPCATG_DESC      v_ast_subcatg_desc_a  -> SUBCATG_DESC
+     v_cstm_supcatg_code_a -> CSTM_SUPCATG_CODE v_cstm_subcatg_code_a -> CSTM_SUBCATG_CODE
+   CSTM_*_DESC repeat SUPCATG_DESC / SUBCATG_DESC (same as existing table).
+   Joined to DT1 on (instr_id, iss_type).
+   Held instruments missing from NPF_ASSET get no row - same as Oracle, where
+   the proc needs the instrument in NPF_ASSET.
+   ----------------------------------------------------------------------------- */
+create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY(
+  SCHEMA_ID,
+  CUST_SK,
+  INSTR_ID,
+  RPTG_TYPE,
+  ISS_TYPE,
+  SUPCATG_CODE,
+  SUBCATG_CODE,
+  SUPCATG_DESC,
+  SUBCATG_DESC,
+  CSTM_SUPCATG_CODE,
+  CSTM_SUBCATG_CODE,
+  CSTM_SUPCATG_DESC,
+  CSTM_SUBCATG_DESC,
+  SCHEMA_DESC
+) target_lag = '60 minutes' refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
+ as
+WITH calls AS (
+    SELECT
+        s.schema_id,
+        s.cust_sk,
+        s.schema_desc,
+        a.instr_id,
+        'WLT' AS rptg_type,
+        a.iss_type,
+        a.std_sup_code,
+        a.std_sub_code,
+        a.std_sup_desc,
+        a.std_sub_desc,
+        cr.schema_id AS cstm_hit,                 -- NOT NULL => Path 1
+        cr.cstm_supcatg_code,
+        cr.cstm_supcatg_desc,
+        cr.npf_supcatg_code,
+        cr.cstm_subcatg_code,
+        cr.cstm_subcatg_desc,
+        cr.npf_subcatg_code,
+        rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
+    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
+    JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci        -- customer's holdings
+      ON ci.cust_sk = s.cust_sk
+    JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a
+      ON a.instr_id = ci.instr_id
+     AND EQUAL_NULL(a.iss_type, ci.iss_type)                   -- NULL issue type kept (gets defaults)
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN cr
+           ON cr.schema_id = s.schema_id
+          AND cr.instr_id  = a.instr_id
+    LEFT JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_RULE_PICK_DYN rp
+           ON rp.schema_id      = s.schema_id
+          AND rp.sup_desc_key   = a.sup_desc_key
+          AND rp.sub_desc_key   = a.sub_desc_key
+          AND rp.cntry_desc_key = a.cntry_desc_key
+),
+out AS (
+    SELECT
+        schema_id, cust_sk, instr_id, rptg_type, iss_type, schema_desc,
+        std_sup_code AS supcatg_code,
+        std_sub_code AS subcatg_code,
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_supcatg_desc                        -- P8
+             ELSE COALESCE(rn_sup, r1_sup, std_sup_desc) END                AS supcatg_desc,   -- P7
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_subcatg_desc
+             ELSE COALESCE(rn_sub, r1_sub, std_sub_desc) END                AS subcatg_desc,
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  -- Oracle 4-branch matrix == per-code independent choice
+                  IFF(cstm_supcatg_code IS NULL, NVL(npf_supcatg_code,  '') || '-S',
+                                                 cstm_supcatg_code         || '-C')
+             ELSE NVL(std_sup_code, '') || '-S' END                         AS cstm_supcatg_code,  -- P3
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_subcatg_code IS NULL, NVL(npf_subcatg_code,  '') || '-S',
+                                                 cstm_subcatg_code         || '-C')
+             ELSE NVL(std_sup_code, '') || '-' || NVL(std_sub_code, '') || '-S' END AS cstm_subcatg_code
+    FROM calls
+)
+SELECT
+    schema_id,
+    cust_sk,
+    instr_id,
+    rptg_type,
+    iss_type,
+    supcatg_code,
+    subcatg_code,
+    supcatg_desc,
+    subcatg_desc,
+    cstm_supcatg_code,
+    cstm_subcatg_code,
+    supcatg_desc AS cstm_supcatg_desc,
+    subcatg_desc AS cstm_subcatg_desc,
+    schema_desc
+FROM out;
+
+
+/* =============================================================================
+   Post-create checks
+   ============================================================================= */
+-- SHOW DYNAMIC TABLES LIKE 'WPA_C%' IN SCHEMA DEV_WPA_ASSET_DB.CORE;             -- refresh_mode / reason
+-- ALTER DYNAMIC TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY REFRESH;   -- first load
+
+-- Expected rows for one customer + schema = (instrument, issue type) pairs that
+-- customer held/transacted (any date) AND that exist in DT1
+-- SET V_SCHEMA = 10190;  SET V_CUST = 1003;
+-- SELECT
+--   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci
+--     JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a ON a.instr_id = ci.instr_id
+--                                                          AND EQUAL_NULL(a.iss_type, ci.iss_type)
+--    WHERE ci.cust_sk = $V_CUST)                                                  AS expected,
+--   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+--    WHERE schema_id = $V_SCHEMA AND cust_sk = $V_CUST)                          AS actual;
+
+-- Held instruments missing from the asset DT (would get no row) - expect 0 or explainable
+-- SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci
+-- WHERE NOT EXISTS (SELECT 1 FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a WHERE a.instr_id = ci.instr_id);
+
+-- Grain check: must return 0 rows
+-- SELECT schema_id, cust_sk, instr_id, iss_type, COUNT(*)
+-- FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY GROUP BY ALL HAVING COUNT(*) > 1;
+
+-- Path split
+-- SELECT IFF(cstm_subcatg_code LIKE '%-%-S', 'PATH 2 rule/std', 'PATH 1 custom') AS path, COUNT(*)
+-- FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY GROUP BY 1;
+
+-- Spot-check one instrument against Oracle npf_asst_typ_mgr output
+-- SELECT * FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
+-- WHERE schema_id = <schema> AND instr_id = '<instr>';
+*
+���� 647d53c1a9d6d25636c60af2e41542cd
 ��
 ACSTM Asset schema/UAT2 Validation - CSTM Asset Schema Catg DY.sql��/* =============================================================================
    UAT2 VALIDATION  -  UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
@@ -3405,850 +5311,6 @@ LIMIT 200;
 -- DROP TABLE IF EXISTS UAT2_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF;
 *
 �˶� b728e06b2449e4267640e3531331a5ea
-Ѡ
-?CSTM Asset schema/CSTM Asset Schema Catg DT - Oracle Parity.sql��/* =============================================================================
-   DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY  -  Dynamic Tables (DEV)
-   Built directly from Oracle npf_common_pkg.npf_asst_typ_mgr (11-arg)
-   + npf_asst_typ_mgr (6-arg) + NPF_CUST_SCHEMA_RULE_EVALUATION_PKG.RULE_EVALUATION
-   Reference: Oracle_Asset_Type_Manager_Logic.md
-
-   Grain : one row per NPF_CUST_CSTM_SCHEMA (CUST_SK, SCHEMA_ID) x instrument
-           ever HELD (any date) or TRANSACTED by that CUST_SK, RPTG_TYPE = 'WLT'
-           (= one npf_asst_typ_mgr call per customer holding)
-   Graph :
-     DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN (existing DT: NPF_ASSET, position/txn instruments)
-        │  read ONCE  + NPF_ASSET_CATG (WLT) + NPF_DECODE (CNTRY)
-        ▼
-     DT1 WPA_CAS_ASSET_STD_DYN    (6-arg proc + country)      1 row / instrument
-        ├──────────────────────────────┐
-        ▼                              │
-     DT2 WPA_CAS_RULE_PICK_DYN         │   ◀─ NPF_CSTM_RULE_MSTR / NPF_CSTM_RULE_COND
-        (RULE_EVALUATION)              │
-        │   DT3 WPA_CAS_CSTM_ROW_DYN   │   ◀─ NPF_CSTM_SCHEMA
-        │      (v_rec_cnt + cursor)    │
-        │      │   DT4 WPA_CAS_CUST_INSTR_DYN   ◀─ WPA_AC_POSITION + WPA_TRANSACTION (all dates)
-        │      │      (cust_sk + instr held)    │
-        ▼      ▼                       ▼        ▼
-     FINAL WPA_CSTM_ASSET_SCHEMA_CATG_DY = NPF_CUST_CSTM_SCHEMA ⋈ DT4 (cust_sk) ⋈ DT1 (instr)
-                                         ⟕ DT3 (custom row?) ⟕ DT2 (rule match?)
-
-   Refresh modes: DT1 ADAPTIVE, DT2 INCREMENTAL, DT3 INCREMENTAL,
-                  DT4 ADAPTIVE (append-only pairs), FINAL ADAPTIVE.
-
-   Oracle parity rules applied:
-     P1  Defaults from package spec: '30' / '20' / 'Other Assets' / 'Miscellaneous'
-         (applied in DT1 only when no NPF_ASSET_CATG row exists, as Oracle FETCH).
-     P2  Oracle '' = NULL            -> NULLIF(col,'') on every text input.
-     P3  Oracle CONCAT(NULL,'x')='x' -> NVL(col,'') || 'x'.
-     P4  NULL comparisons never match (EQUAL and NOTEQUAL) - native in Snowflake too.
-     P5  Any condition with LOGICAL_OPER='OR' -> rule = OR, else AND.
-     P6  Active rule with ZERO conditions MATCHES (0 = 0, has_OR false).
-     P7  1 match -> that rule; >1 -> last (highest RULE_SK); COALESCE per column
-         (last, first, standard).
-     P8  Custom row: standard codes, custom desc as-is (even NULL), -C/-S codes.
-     P9  Several active custom rows: Oracle order undefined -> latest START_DT kept.
-     P10 p_cust_sk is not used by the proc -> same values for every CUST_SK of a
-         schema; CUST_SK only decides WHICH instruments get a row (its holdings).
-     P11 Rule result codes and country outputs are not used (as in Oracle).
-
-   Environment : DEV. NPF_* + WPA_ASSET_DYN from DEV_WPA_ASSET_DB.CORE, NPF_DECODE from
-                 DEV_WPA_COMMON_UTIL_DB.CORE, positions from
-                 DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION + DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION, warehouse DEV_ADHOC_ANALYSIS.
-                 For UAT2: replace DEV_ -> UAT2_ and the warehouse name.
-   NOT compiled here - DEV databases not visible from this session.
-   ============================================================================= */
-
-
-/* -----------------------------------------------------------------------------
-   0. Pre-reqs
-   ----------------------------------------------------------------------------- */
--- Change tracking on base tables read directly by the DTs
--- (DT1 reads WPA_ASSET_DYN, a dynamic table - no change-tracking ALTER needed)
--- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG        SET CHANGE_TRACKING = TRUE;
--- ALTER TABLE DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE      SET CHANGE_TRACKING = TRUE;
--- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA  SET CHANGE_TRACKING = TRUE;
--- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA       SET CHANGE_TRACKING = TRUE;
--- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR    SET CHANGE_TRACKING = TRUE;
--- ALTER TABLE DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND    SET CHANGE_TRACKING = TRUE;
--- ALTER TABLE DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION    SET CHANGE_TRACKING = TRUE;   -- skip if it is a DT
--- ALTER TABLE DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION  SET CHANGE_TRACKING = TRUE;   -- skip if it is a DT
-
--- Final DT is named WPA_CSTM_ASSET_SCHEMA_CATG_DY, so the existing proc-loaded
--- table WPA_CSTM_ASSET_SCHEMA_CATG is left untouched (parallel run / comparison).
-
-
-/* -----------------------------------------------------------------------------
-   DT1  WPA_CAS_ASSET_STD_DYN
-   = npf_asst_typ_mgr 6-arg (standard category, defaults when no mapping)
-     + country lookup of the 11-arg ELSE branch (country-of-risk description).
-   The ONLY reader of the asset data. DT2 and FINAL both read this table, so the
-   asset -> category/country mapping and the *_DESC_KEY join keys are defined
-   once.
-   Reads the existing WPA_ASSET_DYN (NPF_ASSET pre-filtered to instruments in
-   WPA_AC_POSITION / WPA_TRANSACTION), so DT1/DT2 only carry relevant assets.
-   Only ISS_TYPE and CNTRY_RISK_DCDE are taken from it - raw NPF_ASSET columns,
-   so the Oracle logic is unchanged. Its own category/country desc columns are
-   NOT used (different lookups); the Oracle lookups are joined below.
-   Which customer gets which instrument is still decided by DT4.
-   WPA_ASSET_DYN is INCREMENTAL, so this ADAPTIVE DT can read it. Then:
-     - category : LEFT JOIN NPF_ASSET_CATG (RPTG_TYPE='WLT'); defaults only when
-                  no mapping row exists (Oracle FETCH semantics)
-     - country  : LEFT JOIN NPF_DECODE (DCDE_TYPE='CNTRY'); NULL when not found
-   ----------------------------------------------------------------------------- */
-create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN(
-  INSTR_ID,
-  ISS_TYPE,
-  STD_SUP_CODE,
-  STD_SUB_CODE,
-  STD_SUP_DESC,
-  STD_SUB_DESC,
-  CNTRY_DESC,
-  SUP_DESC_KEY,
-  SUB_DESC_KEY,
-  CNTRY_DESC_KEY
-) target_lag = DOWNSTREAM refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
- as
-SELECT
-    instr_id,
-    iss_type,
-    std_sup_code,
-    std_sub_code,
-    std_sup_desc,
-    std_sub_desc,
-    cntry_desc,
-    NVL(std_sup_desc, '#NULL#') AS sup_desc_key,
-    NVL(std_sub_desc, '#NULL#') AS sub_desc_key,
-    NVL(cntry_desc,   '#NULL#') AS cntry_desc_key
-FROM (
-    SELECT
-        a.instr_id,
-        a.iss_type,
-        -- FETCH overwrites all 4 defaults when a mapping row exists (even NULL values)
-        IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
-        IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
-        IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
-        IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
-        NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
-    FROM DEV_WPA_ASSET_DB.CORE.WPA_ASSET_DYN a                -- relevant assets only
-    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
-           ON ac.rptg_type = 'WLT'
-          AND ac.iss_type  = a.iss_type
-    LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
-           ON d.dcde_type = 'CNTRY'
-          AND d.dcde_code = a.cntry_risk_dcde
-);
-
-
-/* -----------------------------------------------------------------------------
-   DT2  WPA_CAS_RULE_PICK_DYN
-   = RULE_EVALUATION(schema, std_sup_desc, std_sub_desc, cntry_desc)
-   Flow inside this DT:
-     combo      : DISTINCT (std_sup_desc, std_sub_desc, cntry_desc) from DT1
-     rule_eval  : active rules x combo -> per-rule cond / match counts
-     final SELECT: keep matched rules, pick first (R1) and last (RN) per combo
-   Evaluated once per (schema, distinct desc combo) - inputs are only these
-   three values, so the result is identical to calling it per instrument.
-   Only combos with >= 1 matching rule are stored; others fall back to std.
-   ----------------------------------------------------------------------------- */
-create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_RULE_PICK_DYN(
-  SCHEMA_ID,
-  SUP_DESC_KEY,
-  SUB_DESC_KEY,
-  CNTRY_DESC_KEY,
-  MATCHED_RULE_CNT,
-  R1_SUP,
-  R1_SUB,
-  RN_SUP,
-  RN_SUB
-) target_lag = DOWNSTREAM refresh_mode = INCREMENTAL initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
- as
-WITH combo AS (
-    SELECT std_sup_desc, std_sub_desc, cntry_desc,
-           sup_desc_key, sub_desc_key, cntry_desc_key
-    FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN
-    GROUP BY std_sup_desc, std_sub_desc, cntry_desc,
-             sup_desc_key, sub_desc_key, cntry_desc_key
-),
-rule_eval AS (
-    SELECT
-        r.schema_id,
-        cb.sup_desc_key,
-        cb.sub_desc_key,
-        cb.cntry_desc_key,
-        r.rule_sk,
-        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
-        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
-        MAX(IFF(c.logical_oper = 'OR', 1, 0)) AS has_or,          -- P5
-        COUNT(c.rule_sk)                      AS cond_cnt,        -- 0 when no conditions
-        COUNT_IF(
-             (c.rule_fld_name = 'CSTM_SUPCATG_DESC' AND
-               ((c.rule_oper = 'EQUAL'    AND cb.std_sup_desc =  NULLIF(c.rule_fld_value, '')) OR
-                (c.rule_oper = 'NOTEQUAL' AND cb.std_sup_desc != NULLIF(c.rule_fld_value, ''))))
-          OR (c.rule_fld_name = 'CSTM_SUBCATG_DESC' AND
-               ((c.rule_oper = 'EQUAL'    AND cb.std_sub_desc =  NULLIF(c.rule_fld_value, '')) OR
-                (c.rule_oper = 'NOTEQUAL' AND cb.std_sub_desc != NULLIF(c.rule_fld_value, ''))))
-          OR (c.rule_fld_name = 'CSTM_CNTRY_RISK_DESC' AND
-               ((c.rule_oper = 'EQUAL'    AND cb.cntry_desc   =  NULLIF(c.rule_fld_value, '')) OR
-                (c.rule_oper = 'NOTEQUAL' AND cb.cntry_desc   != NULLIF(c.rule_fld_value, ''))))
-        )                                     AS match_cnt        -- P4: NULL -> not counted
-    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
-    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c          -- LEFT: P6
-           ON c.rule_sk = r.rule_sk
-    CROSS JOIN combo cb
-    WHERE r.rule_stat = 'A'
-    GROUP BY r.schema_id, cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
-             r.rule_sk, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc
-)
-SELECT
-    schema_id,
-    sup_desc_key,
-    sub_desc_key,
-    cntry_desc_key,
-    COUNT(*)                                                AS matched_rule_cnt,
-    MIN_BY(rule_sup_desc, rule_sk)                          AS r1_sup,   -- first match (_1)
-    MIN_BY(rule_sub_desc, rule_sk)                          AS r1_sub,
-    IFF(COUNT(*) > 1, MAX_BY(rule_sup_desc, rule_sk), NULL) AS rn_sup,   -- last match (_2)
-    IFF(COUNT(*) > 1, MAX_BY(rule_sub_desc, rule_sk), NULL) AS rn_sub
-FROM rule_eval
-WHERE (has_or = 1 AND match_cnt > 0)
-   OR (has_or = 0 AND match_cnt = cond_cnt)
-GROUP BY schema_id, sup_desc_key, sub_desc_key, cntry_desc_key;
-
-
-/* -----------------------------------------------------------------------------
-   DT3  WPA_CAS_CSTM_ROW_DYN
-   = v_rec_cnt > 0 check + cstm_asset_cursor (active row, END_DT IS NULL).
-   Instrument-exists check of the cursor (join NPF_ASSET) is satisfied in the
-   final DT because instruments come from DT1.
-   QUALIFY is a safeguard only: no duplicate active rows exist today.
-   ----------------------------------------------------------------------------- */
-create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN(
-  SCHEMA_ID,
-  INSTR_ID,
-  RPTG_TYPE,
-  CSTM_SUPCATG_CODE,
-  CSTM_SUPCATG_DESC,
-  NPF_SUPCATG_CODE,
-  CSTM_SUBCATG_CODE,
-  CSTM_SUBCATG_DESC,
-  NPF_SUBCATG_CODE
-) target_lag = DOWNSTREAM refresh_mode = INCREMENTAL initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
- as
-SELECT
-    ncs.schema_id,
-    ncs.instr_id,
-    ncs.rptg_type,
-    NULLIF(ncs.cstm_supcatg_code, '') AS cstm_supcatg_code,
-    NULLIF(ncs.cstm_supcatg_desc, '') AS cstm_supcatg_desc,
-    NULLIF(ncs.npf_supcatg_code,  '') AS npf_supcatg_code,
-    NULLIF(ncs.cstm_subcatg_code, '') AS cstm_subcatg_code,
-    NULLIF(ncs.cstm_subcatg_desc, '') AS cstm_subcatg_desc,
-    NULLIF(ncs.npf_subcatg_code,  '') AS npf_subcatg_code
-FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
-WHERE ncs.rptg_type = 'WLT'
-  AND ncs.end_dt IS NULL
-QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY ncs.schema_id, ncs.instr_id, ncs.rptg_type
-            ORDER BY ncs.start_dt DESC) = 1;                       -- P9
-
-
-/* -----------------------------------------------------------------------------
-   DT4  WPA_CAS_CUST_INSTR_DYN
-   = which instruments each customer holds -> drives which rows the final DT has
-     (replaces "every schema x every instrument" with "every schema x the
-      customer's own holdings").
-   Holdings = every (cust_sk, instr_id) the customer EVER had a position in
-   (any CALENDAR_DATE) or EVER transacted (WPA_TRANSACTION). No date filter:
-   latest-date-only was ruled out because it misses instruments.
-   UNION ALL + outer GROUP BY (not UNION) keeps the DT incrementally refreshable;
-   new positions / transactions only add pairs, so refreshes stay small.
-   Why CUST_SK is NOT put into DT1 instead: DT1 would become 1 row per
-   (customer, instrument), repeating asset attributes per customer, DT2 would
-   GROUP BY that bigger set, and daily position/txn churn would cascade into
-   DT1 -> DT2. Keeping CUST_SK here isolates that churn to DT4 + FINAL.
-   Kept as its own DT (not inlined into FINAL): many rows per (cust_sk, instr_id),
-   so a de-duplicating GROUP BY is needed. Here it is the outermost
-   operation (incrementally maintainable); nested inside FINAL it would be
-   recomputed from scratch on every refresh.
-   ----------------------------------------------------------------------------- */
-create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN(
-  CUST_SK,
-  INSTR_ID
-) target_lag = DOWNSTREAM refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
- as
-WITH src AS (
-    SELECT p.cust_sk, p.instr_id                       -- positions, any date
-    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
-    WHERE p.instr_id IS NOT NULL
-      AND p.cust_sk  IS NOT NULL
-    UNION ALL
-    SELECT t.cust_sk, t.instr_id                       -- transactions, any date
-    FROM DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
-    WHERE t.instr_id IS NOT NULL
-      AND t.cust_sk  IS NOT NULL
-)
-SELECT cust_sk, instr_id
-FROM src
-GROUP BY cust_sk, instr_id;
-
-
-/* -----------------------------------------------------------------------------
-   FINAL  WPA_CSTM_ASSET_SCHEMA_CATG_DY
-   = npf_asst_typ_mgr 11-arg, for every (cust_sk, schema) x instrument the
-     customer holds (DT4).
-     Path 1 (IF v_rec_cnt <> 0): custom row
-     Path 2 (ELSE)             : RULE_EVALUATION result / standard
-   OUT param mapping:
-     v_ast_supcatg_code_a  -> SUPCATG_CODE      v_ast_subcatg_code_a  -> SUBCATG_CODE
-     v_ast_supcatg_desc_a  -> SUPCATG_DESC      v_ast_subcatg_desc_a  -> SUBCATG_DESC
-     v_cstm_supcatg_code_a -> CSTM_SUPCATG_CODE v_cstm_subcatg_code_a -> CSTM_SUBCATG_CODE
-   CSTM_*_DESC repeat SUPCATG_DESC / SUBCATG_DESC (same as existing table).
-   Held instruments missing from NPF_ASSET get no row - same as Oracle, where
-   the proc needs the instrument in NPF_ASSET.
-   ----------------------------------------------------------------------------- */
-create or replace dynamic table DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY(
-  SCHEMA_ID,
-  CUST_SK,
-  INSTR_ID,
-  RPTG_TYPE,
-  ISS_TYPE,
-  SUPCATG_CODE,
-  SUBCATG_CODE,
-  SUPCATG_DESC,
-  SUBCATG_DESC,
-  CSTM_SUPCATG_CODE,
-  CSTM_SUBCATG_CODE,
-  CSTM_SUPCATG_DESC,
-  CSTM_SUBCATG_DESC,
-  SCHEMA_DESC
-) target_lag = '60 minutes' refresh_mode = ADAPTIVE initialize = ON_SCHEDULE warehouse = DEV_ADHOC_ANALYSIS
- as
-WITH calls AS (
-    SELECT
-        s.schema_id,
-        s.cust_sk,
-        s.schema_desc,
-        a.instr_id,
-        'WLT' AS rptg_type,
-        a.iss_type,
-        a.std_sup_code,
-        a.std_sub_code,
-        a.std_sup_desc,
-        a.std_sub_desc,
-        cr.schema_id AS cstm_hit,                 -- NOT NULL => Path 1
-        cr.cstm_supcatg_code,
-        cr.cstm_supcatg_desc,
-        cr.npf_supcatg_code,
-        cr.cstm_subcatg_code,
-        cr.cstm_subcatg_desc,
-        cr.npf_subcatg_code,
-        rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
-    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
-    JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci        -- customer's holdings
-      ON ci.cust_sk = s.cust_sk
-    JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a
-      ON a.instr_id = ci.instr_id
-    LEFT JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_CSTM_ROW_DYN cr
-           ON cr.schema_id = s.schema_id
-          AND cr.instr_id  = a.instr_id
-    LEFT JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_RULE_PICK_DYN rp
-           ON rp.schema_id      = s.schema_id
-          AND rp.sup_desc_key   = a.sup_desc_key
-          AND rp.sub_desc_key   = a.sub_desc_key
-          AND rp.cntry_desc_key = a.cntry_desc_key
-),
-out AS (
-    SELECT
-        schema_id, cust_sk, instr_id, rptg_type, iss_type, schema_desc,
-        std_sup_code AS supcatg_code,
-        std_sub_code AS subcatg_code,
-        CASE WHEN cstm_hit IS NOT NULL THEN cstm_supcatg_desc                        -- P8
-             ELSE COALESCE(rn_sup, r1_sup, std_sup_desc) END                AS supcatg_desc,   -- P7
-        CASE WHEN cstm_hit IS NOT NULL THEN cstm_subcatg_desc
-             ELSE COALESCE(rn_sub, r1_sub, std_sub_desc) END                AS subcatg_desc,
-        CASE WHEN cstm_hit IS NOT NULL THEN
-                  -- Oracle 4-branch matrix == per-code independent choice
-                  IFF(cstm_supcatg_code IS NULL, NVL(npf_supcatg_code,  '') || '-S',
-                                                 cstm_supcatg_code         || '-C')
-             ELSE NVL(std_sup_code, '') || '-S' END                         AS cstm_supcatg_code,  -- P3
-        CASE WHEN cstm_hit IS NOT NULL THEN
-                  IFF(cstm_subcatg_code IS NULL, NVL(npf_subcatg_code,  '') || '-S',
-                                                 cstm_subcatg_code         || '-C')
-             ELSE NVL(std_sup_code, '') || '-' || NVL(std_sub_code, '') || '-S' END AS cstm_subcatg_code
-    FROM calls
-)
-SELECT
-    schema_id,
-    cust_sk,
-    instr_id,
-    rptg_type,
-    iss_type,
-    supcatg_code,
-    subcatg_code,
-    supcatg_desc,
-    subcatg_desc,
-    cstm_supcatg_code,
-    cstm_subcatg_code,
-    supcatg_desc AS cstm_supcatg_desc,
-    subcatg_desc AS cstm_subcatg_desc,
-    schema_desc
-FROM out;
-
-
-/* =============================================================================
-   Post-create checks
-   ============================================================================= */
--- SHOW DYNAMIC TABLES LIKE 'WPA_C%' IN SCHEMA DEV_WPA_ASSET_DB.CORE;             -- refresh_mode / reason
--- ALTER DYNAMIC TABLE DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY REFRESH;   -- first load
-
--- Expected rows for one customer + schema = instruments that customer holds on the
--- held/transacted (any date) AND that exist in DT1 (e.g. cust 104265 >= 6104)
--- SET V_SCHEMA = 10190;  SET V_CUST = 1003;
--- SELECT
---   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci
---     JOIN DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a ON a.instr_id = ci.instr_id
---    WHERE ci.cust_sk = $V_CUST)                                                  AS expected,
---   (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
---    WHERE schema_id = $V_SCHEMA AND cust_sk = $V_CUST)                          AS actual;
-
--- Held instruments missing from the asset DT (would get no row) - expect 0 or explainable
--- SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_CUST_INSTR_DYN ci
--- WHERE NOT EXISTS (SELECT 1 FROM DEV_WPA_ASSET_DB.CORE.WPA_CAS_ASSET_STD_DYN a WHERE a.instr_id = ci.instr_id);
-
--- Path split
--- SELECT IFF(cstm_subcatg_code LIKE '%-%-S', 'PATH 2 rule/std', 'PATH 1 custom') AS path, COUNT(*)
--- FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY GROUP BY 1;
-
--- Spot-check one instrument against Oracle npf_asst_typ_mgr output
--- SELECT * FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
--- WHERE schema_id = <schema> AND instr_id = '<instr>';
-*
-ĸ�� bd6ce6be63e1a1f635a5fa21a221065d
-�
-<CSTM Asset schema/Validation - CSTM Asset Schema Catg DY.sql��/* =============================================================================
-   VALIDATION  -  DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-   Checks every (SCHEMA_ID, INSTR_ID, CUST_SK) row against an INDEPENDENT
-   re-implementation of Oracle npf_asst_typ_mgr (11-arg) + RULE_EVALUATION,
-   built straight from base tables (not from the WPA_CAS_* DTs):
-     - standard category from NPF_ASSET + NPF_ASSET_CATG + package defaults
-     - country from NPF_ASSET.cntry_risk_dcde + NPF_DECODE('CNTRY')
-     - rules evaluated PER INSTRUMENT (DT evaluates per desc combo)
-   Grain (same as the DT) = each NPF_CUST_CSTM_SCHEMA (cust_sk, schema) x the
-   instruments that cust_sk ever held (WPA_AC_POSITION, any date) or transacted (WPA_TRANSACTION)
-   (instrument attributes read straight from NPF_ASSET, as the Oracle proc does;
-   held/transacted instruments = the same set WPA_ASSET_DYN keeps).
-
-   Sections
-     0  Parameters
-     1  Build expected result (temp table) with Oracle SCENARIO tag
-     2  Structural checks (grain, duplicates, NULLs, code formats)
-     3  Full comparison DT vs expected  (per column, per scenario)
-     4  Scenario coverage + sample rows per scenario
-     5  CUST_SK consistency (same schema -> same values for every customer)
-     6  Optional: compare with old proc-loaded table WPA_CSTM_ASSET_SCHEMA_CATG
-
-   Scenarios (Oracle branch that produced the row)
-     P1-CC  custom row, cstm sup code + cstm sub code       -> sup -C, sub -C
-     P1-SC  custom row, cstm sup NULL, cstm sub present     -> sup -S, sub -C
-     P1-CS  custom row, cstm sup present, cstm sub NULL     -> sup -C, sub -S
-     P1-SS  custom row, both cstm codes NULL                -> sup -S, sub -S
-     P2-R1  no custom row, exactly 1 rule matched           -> rule desc
-     P2-RN  no custom row, >1 rule matched                  -> last rule desc (per column fallback)
-     P2-STD no custom row, no rule matched                  -> standard desc
-   Extra flags: DEFAULT_CATG (no NPF_ASSET_CATG mapping -> 30/20),
-                NO_CNTRY (country desc NULL), NULL_ISS_TYPE.
-   ============================================================================= */
-
-
-/* =============================================================================
-   0. Parameters
-   Set V_SCHEMA_ID to one schema for a fast run, or NULL for all schemas.
-   ============================================================================= */
-SET V_SCHEMA_ID = NULL;          -- e.g. SET V_SCHEMA_ID = 101;
-
-
-/* =============================================================================
-   1. Expected result (independent Oracle re-implementation)
-   ============================================================================= */
-CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED AS
-WITH
-hold AS (                                     -- customer positions (any date) + transactions
-    SELECT p.cust_sk, p.instr_id
-    FROM DEV_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
-    WHERE p.instr_id IS NOT NULL AND p.cust_sk IS NOT NULL
-    UNION
-    SELECT t.cust_sk, t.instr_id
-    FROM DEV_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
-    WHERE t.instr_id IS NOT NULL AND t.cust_sk IS NOT NULL
-),
-ast AS (                                      -- NPF_ASSET attributes used by the proc
-    SELECT a.instr_id, a.iss_type, a.cntry_risk_dcde        -- (only held instruments, for speed)
-    FROM DEV_WPA_ASSET_DB.CORE.NPF_ASSET a
-    WHERE a.instr_id IN (SELECT instr_id FROM hold)
-),
-std AS (                                      -- 6-arg npf_asst_typ_mgr + country lookup
-    SELECT
-        ast.instr_id,
-        ast.iss_type,
-        IFF(ac.iss_type IS NULL, 'Y', 'N')                                      AS default_catg,
-        IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
-        IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
-        IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
-        IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
-        NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
-    FROM ast
-    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
-           ON ac.rptg_type = 'WLT' AND ac.iss_type = ast.iss_type
-    LEFT JOIN DEV_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
-           ON d.dcde_type = 'CNTRY' AND d.dcde_code = ast.cntry_risk_dcde
-),
-sch AS (
-    SELECT cust_sk, schema_id, schema_desc
-    FROM DEV_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
-    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-),
-cs AS (                                       -- v_rec_cnt + cstm_asset_cursor
-    SELECT schema_id, instr_id,
-           NULLIF(cstm_supcatg_code, '') AS cstm_supcatg_code,
-           NULLIF(cstm_supcatg_desc, '') AS cstm_supcatg_desc,
-           NULLIF(npf_supcatg_code,  '') AS npf_supcatg_code,
-           NULLIF(cstm_subcatg_code, '') AS cstm_subcatg_code,
-           NULLIF(cstm_subcatg_desc, '') AS cstm_subcatg_desc,
-           NULLIF(npf_subcatg_code,  '') AS npf_subcatg_code
-    FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA
-    WHERE rptg_type = 'WLT' AND end_dt IS NULL
-      AND ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id ORDER BY start_dt DESC) = 1
-),
-grid AS (                                     -- one row per npf_asst_typ_mgr call
-    SELECT s.cust_sk, s.schema_id, s.schema_desc, t.*
-    FROM sch s
-    JOIN hold h ON h.cust_sk  = s.cust_sk
-    JOIN std  t ON t.instr_id = h.instr_id
-),
-need_rules AS (                               -- (schema, instr) pairs that go to RULE_EVALUATION
-    SELECT DISTINCT g.schema_id, g.instr_id, g.std_sup_desc, g.std_sub_desc, g.cntry_desc
-    FROM grid g
-    WHERE NOT EXISTS (SELECT 1 FROM cs WHERE cs.schema_id = g.schema_id AND cs.instr_id = g.instr_id)
-),
-cond_eval AS (                                -- one row per (schema, instr, rule, condition)
-    SELECT
-        n.schema_id, n.instr_id, r.rule_sk,
-        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
-        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
-        c.cond_sk,
-        c.logical_oper,
-        CASE c.rule_fld_name
-             WHEN 'CSTM_SUPCATG_DESC'    THEN n.std_sup_desc
-             WHEN 'CSTM_SUBCATG_DESC'    THEN n.std_sub_desc
-             WHEN 'CSTM_CNTRY_RISK_DESC' THEN n.cntry_desc
-        END                                  AS fld_val,
-        c.rule_fld_name,
-        c.rule_oper,
-        NULLIF(c.rule_fld_value, '')         AS rule_fld_value
-    FROM need_rules n
-    JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
-      ON r.schema_id = n.schema_id AND r.rule_stat = 'A'
-    LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c
-      ON c.rule_sk = r.rule_sk
-),
-rule_match AS (                               -- Oracle per-rule decision
-    SELECT schema_id, instr_id, rule_sk, rule_sup_desc, rule_sub_desc,
-           BOOLOR_AGG(COALESCE(logical_oper = 'OR', FALSE))                      AS has_or,
-           COUNT(cond_sk)                                                        AS n_cond,
-           COUNT_IF(COALESCE(
-               CASE WHEN rule_fld_name IN ('CSTM_SUPCATG_DESC','CSTM_SUBCATG_DESC','CSTM_CNTRY_RISK_DESC')
-                    THEN CASE rule_oper
-                              WHEN 'EQUAL'    THEN fld_val =  rule_fld_value
-                              WHEN 'NOTEQUAL' THEN fld_val <> rule_fld_value
-                         END
-               END, FALSE))                                                      AS n_true
-    FROM cond_eval
-    GROUP BY schema_id, instr_id, rule_sk, rule_sup_desc, rule_sub_desc
-),
-matched AS (
-    SELECT *,
-           ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id ORDER BY rule_sk ASC)  AS rn_first,
-           ROW_NUMBER() OVER (PARTITION BY schema_id, instr_id ORDER BY rule_sk DESC) AS rn_last,
-           COUNT(*)     OVER (PARTITION BY schema_id, instr_id)                       AS n_match
-    FROM rule_match
-    WHERE (has_or AND n_true > 0) OR (NOT has_or AND n_true = n_cond)
-),
-rule_out AS (                                 -- desc_1 = first, desc_2 = last (only if >1)
-    SELECT schema_id, instr_id, MAX(n_match) AS n_match,
-           MAX(IFF(rn_first = 1, rule_sup_desc, NULL))                 AS d1_sup,
-           MAX(IFF(rn_first = 1, rule_sub_desc, NULL))                 AS d1_sub,
-           MAX(IFF(rn_last  = 1 AND n_match > 1, rule_sup_desc, NULL)) AS d2_sup,
-           MAX(IFF(rn_last  = 1 AND n_match > 1, rule_sub_desc, NULL)) AS d2_sub
-    FROM matched
-    GROUP BY schema_id, instr_id
-)
-SELECT
-    s.schema_id,
-    s.cust_sk,
-    t.instr_id,
-    'WLT'                                     AS rptg_type,
-    t.iss_type,
-    -- OUT: v_ast_supcatg_code_a / v_ast_subcatg_code_a (always standard)
-    t.std_sup_code                            AS supcatg_code,
-    t.std_sub_code                            AS subcatg_code,
-    -- OUT: v_ast_supcatg_desc_a / v_ast_subcatg_desc_a
-    CASE WHEN cs.schema_id IS NOT NULL THEN cs.cstm_supcatg_desc
-         ELSE COALESCE(ro.d2_sup, ro.d1_sup, t.std_sup_desc) END        AS supcatg_desc,
-    CASE WHEN cs.schema_id IS NOT NULL THEN cs.cstm_subcatg_desc
-         ELSE COALESCE(ro.d2_sub, ro.d1_sub, t.std_sub_desc) END        AS subcatg_desc,
-    -- OUT: v_cstm_supcatg_code_a / v_cstm_subcatg_code_a (Oracle 4-branch matrix, literal)
-    CASE
-      WHEN cs.schema_id IS NULL                                                    THEN NVL(t.std_sup_code,'') || '-S'
-      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NOT NULL   THEN NVL(cs.npf_supcatg_code,'')  || '-S'
-      WHEN cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NULL       THEN cs.cstm_supcatg_code         || '-C'
-      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NULL       THEN NVL(cs.npf_supcatg_code,'')  || '-S'
-      ELSE                                                                              cs.cstm_supcatg_code         || '-C'
-    END                                                                 AS cstm_supcatg_code,
-    CASE
-      WHEN cs.schema_id IS NULL                                                    THEN NVL(t.std_sup_code,'') || '-' || NVL(t.std_sub_code,'') || '-S'
-      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NOT NULL   THEN cs.cstm_subcatg_code         || '-C'
-      WHEN cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NULL       THEN NVL(cs.npf_subcatg_code,'')  || '-S'
-      WHEN cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NULL       THEN NVL(cs.npf_subcatg_code,'')  || '-S'
-      ELSE                                                                              cs.cstm_subcatg_code         || '-C'
-    END                                                                 AS cstm_subcatg_code,
-    s.schema_desc,
-    -- Scenario tags
-    CASE
-      WHEN cs.schema_id IS NOT NULL AND cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NOT NULL THEN 'P1-CC'
-      WHEN cs.schema_id IS NOT NULL AND cs.cstm_supcatg_code IS NULL     AND cs.cstm_subcatg_code IS NOT NULL THEN 'P1-SC'
-      WHEN cs.schema_id IS NOT NULL AND cs.cstm_supcatg_code IS NOT NULL AND cs.cstm_subcatg_code IS NULL     THEN 'P1-CS'
-      WHEN cs.schema_id IS NOT NULL                                                                           THEN 'P1-SS'
-      WHEN ro.n_match = 1                                                                                     THEN 'P2-R1'
-      WHEN ro.n_match > 1                                                                                     THEN 'P2-RN'
-      ELSE                                                                                                         'P2-STD'
-    END                                                                 AS scenario,
-    t.default_catg,
-    IFF(t.cntry_desc IS NULL, 'Y', 'N')                                 AS no_cntry,
-    IFF(t.iss_type   IS NULL, 'Y', 'N')                                 AS null_iss_type,
-    NVL(ro.n_match, 0)                                                  AS n_rules_matched
-FROM grid t
-JOIN sch s         ON s.cust_sk = t.cust_sk AND s.schema_id = t.schema_id
-LEFT JOIN cs       ON cs.schema_id = s.schema_id AND cs.instr_id = t.instr_id
-LEFT JOIN rule_out ro ON ro.schema_id = s.schema_id AND ro.instr_id = t.instr_id;
-
-
-/* =============================================================================
-   2. Structural checks on the DT
-   ============================================================================= */
-
--- 2.1 Row counts: DT vs expected (cust-schema rows x that customer's holdings)
-SELECT
-  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID))                     AS dt_rows,
-  (SELECT COUNT(*) FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED)                  AS expected_rows;
-
--- 2.1b Same, per customer (spot the customers whose counts differ; expect 0 rows)
-SELECT COALESCE(d.schema_id, e.schema_id) AS schema_id,
-       COALESCE(d.cust_sk,   e.cust_sk)   AS cust_sk,
-       d.cnt AS dt_rows, e.cnt AS expected_rows
-FROM (SELECT schema_id, cust_sk, COUNT(*) cnt
-      FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-      WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-      GROUP BY 1,2) d
-FULL OUTER JOIN
-     (SELECT schema_id, cust_sk, COUNT(*) cnt
-      FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED GROUP BY 1,2) e
-  ON e.schema_id = d.schema_id AND e.cust_sk = d.cust_sk
-WHERE NOT EQUAL_NULL(d.cnt, e.cnt)
-ORDER BY 1,2
-LIMIT 100;
-
--- 2.2 Duplicate keys in DT (expect 0)
-SELECT schema_id, instr_id, cust_sk, COUNT(*) AS cnt
-FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-GROUP BY 1,2,3 HAVING COUNT(*) > 1
-LIMIT 100;
-
--- 2.3 NULL / format checks (each count should be 0 unless explained by source data)
-SELECT
-  COUNT_IF(supcatg_code IS NULL)                                   AS null_supcatg_code,
-  COUNT_IF(subcatg_code IS NULL)                                   AS null_subcatg_code,
-  COUNT_IF(supcatg_desc IS NULL)                                   AS null_supcatg_desc,
-  COUNT_IF(subcatg_desc IS NULL)                                   AS null_subcatg_desc,
-  COUNT_IF(cstm_supcatg_code IS NULL)                              AS null_cstm_sup_code,
-  COUNT_IF(cstm_subcatg_code IS NULL)                              AS null_cstm_sub_code,
-  COUNT_IF(NOT (cstm_supcatg_code LIKE '%-S' OR cstm_supcatg_code LIKE '%-C')) AS bad_sup_suffix,
-  COUNT_IF(NOT (cstm_subcatg_code LIKE '%-S' OR cstm_subcatg_code LIKE '%-C')) AS bad_sub_suffix,
-  COUNT_IF(cstm_supcatg_desc IS DISTINCT FROM supcatg_desc)        AS cstm_sup_desc_ne_desc,
-  COUNT_IF(cstm_subcatg_desc IS DISTINCT FROM subcatg_desc)        AS cstm_sub_desc_ne_desc,
-  COUNT_IF(rptg_type <> 'WLT')                                     AS non_wlt
-FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID);
-
--- 2.4 Rule/standard rows: sup code must start the sub code ('<sup>-<sub>-S')
-SELECT COUNT(*) AS bad_fallback_code_pattern
-FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-  AND cstm_subcatg_code LIKE '%-%-S'
-  AND (cstm_supcatg_code <> supcatg_code || '-S'
-       OR cstm_subcatg_code <> supcatg_code || '-' || subcatg_code || '-S');
-
-
-/* =============================================================================
-   3. Full comparison DT vs expected
-   ============================================================================= */
-CREATE OR REPLACE TEMPORARY TABLE DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF AS
-SELECT
-    COALESCE(e.schema_id, d.schema_id) AS schema_id,
-    COALESCE(e.cust_sk,   d.cust_sk)   AS cust_sk,
-    COALESCE(e.instr_id,  d.instr_id)  AS instr_id,
-    e.scenario, e.default_catg, e.no_cntry, e.null_iss_type, e.n_rules_matched,
-    CASE WHEN d.instr_id IS NULL THEN 'MISSING_IN_DT'
-         WHEN e.instr_id IS NULL THEN 'EXTRA_IN_DT'
-         ELSE 'BOTH' END                                                AS presence,
-    NOT EQUAL_NULL(e.iss_type,          d.iss_type)                     AS diff_iss_type,
-    NOT EQUAL_NULL(e.supcatg_code,      d.supcatg_code)                 AS diff_sup_code,
-    NOT EQUAL_NULL(e.subcatg_code,      d.subcatg_code)                 AS diff_sub_code,
-    NOT EQUAL_NULL(e.supcatg_desc,      d.supcatg_desc)                 AS diff_sup_desc,
-    NOT EQUAL_NULL(e.subcatg_desc,      d.subcatg_desc)                 AS diff_sub_desc,
-    NOT EQUAL_NULL(e.cstm_supcatg_code, d.cstm_supcatg_code)            AS diff_cstm_sup_code,
-    NOT EQUAL_NULL(e.cstm_subcatg_code, d.cstm_subcatg_code)            AS diff_cstm_sub_code,
-    NOT EQUAL_NULL(e.schema_desc,       d.schema_desc)                  AS diff_schema_desc,
-    e.supcatg_code      AS exp_sup_code,      d.supcatg_code      AS dt_sup_code,
-    e.subcatg_code      AS exp_sub_code,      d.subcatg_code      AS dt_sub_code,
-    e.supcatg_desc      AS exp_sup_desc,      d.supcatg_desc      AS dt_sup_desc,
-    e.subcatg_desc      AS exp_sub_desc,      d.subcatg_desc      AS dt_sub_desc,
-    e.cstm_supcatg_code AS exp_cstm_sup_code, d.cstm_supcatg_code AS dt_cstm_sup_code,
-    e.cstm_subcatg_code AS exp_cstm_sub_code, d.cstm_subcatg_code AS dt_cstm_sub_code
-FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED e
-FULL OUTER JOIN (
-    SELECT * FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-) d
-  ON d.schema_id = e.schema_id AND d.cust_sk = e.cust_sk AND d.instr_id = e.instr_id;
-
--- 3.1 Overall result: all diff columns should be 0, presence only 'BOTH'
-SELECT presence,
-       COUNT(*)                       AS rows_cnt,
-       COUNT_IF(diff_iss_type)        AS iss_type,
-       COUNT_IF(diff_sup_code)        AS sup_code,
-       COUNT_IF(diff_sub_code)        AS sub_code,
-       COUNT_IF(diff_sup_desc)        AS sup_desc,
-       COUNT_IF(diff_sub_desc)        AS sub_desc,
-       COUNT_IF(diff_cstm_sup_code)   AS cstm_sup_code,
-       COUNT_IF(diff_cstm_sub_code)   AS cstm_sub_code,
-       COUNT_IF(diff_schema_desc)     AS schema_desc
-FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF
-GROUP BY presence;
-
--- 3.2 Mismatches by scenario (which Oracle branch is wrong)
-SELECT scenario, default_catg, no_cntry, null_iss_type,
-       COUNT(*) AS rows_cnt,
-       COUNT_IF(diff_sup_code OR diff_sub_code)           AS std_code_diff,
-       COUNT_IF(diff_sup_desc OR diff_sub_desc)           AS desc_diff,
-       COUNT_IF(diff_cstm_sup_code OR diff_cstm_sub_code) AS cstm_code_diff
-FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF
-WHERE presence = 'BOTH'
-GROUP BY 1,2,3,4
-ORDER BY 1,2,3,4;
-
--- 3.3 Mismatch detail (first 200)
-SELECT schema_id, cust_sk, instr_id, scenario, presence, n_rules_matched,
-       exp_sup_code, dt_sup_code, exp_sub_code, dt_sub_code,
-       exp_sup_desc, dt_sup_desc, exp_sub_desc, dt_sub_desc,
-       exp_cstm_sup_code, dt_cstm_sup_code, exp_cstm_sub_code, dt_cstm_sub_code
-FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF
-WHERE presence <> 'BOTH'
-   OR diff_iss_type OR diff_sup_code OR diff_sub_code OR diff_sup_desc OR diff_sub_desc
-   OR diff_cstm_sup_code OR diff_cstm_sub_code OR diff_schema_desc
-ORDER BY scenario, schema_id, instr_id
-LIMIT 200;
-
-
-/* =============================================================================
-   4. Scenario coverage + samples
-   ============================================================================= */
-
--- 4.1 Coverage: every scenario should have rows (a 0 means that path is untested)
-WITH s AS (
-    SELECT column1 AS scenario FROM VALUES
-      ('P1-CC'),('P1-SC'),('P1-CS'),('P1-SS'),('P2-R1'),('P2-RN'),('P2-STD')
-)
-SELECT s.scenario,
-       COUNT(e.instr_id)                       AS rows_cnt,
-       COUNT(DISTINCT e.schema_id)             AS schemas,
-       COUNT(DISTINCT e.instr_id)              AS instruments,
-       COUNT_IF(e.default_catg  = 'Y')         AS with_default_catg,
-       COUNT_IF(e.no_cntry      = 'Y')         AS with_no_cntry,
-       COUNT_IF(e.null_iss_type = 'Y')         AS with_null_iss_type
-FROM s
-LEFT JOIN DEV_WPA_ASSET_DB.CORE.VAL_CSTM_EXPECTED e ON e.scenario = s.scenario
-GROUP BY s.scenario
-ORDER BY s.scenario;
-
--- 4.2 Three sample rows per scenario: DT values side by side with expected
-SELECT x.scenario, x.schema_id, x.cust_sk, x.instr_id, x.n_rules_matched,
-       x.exp_sup_code, x.dt_sup_code, x.exp_sub_code, x.dt_sub_code,
-       x.exp_sup_desc, x.dt_sup_desc, x.exp_sub_desc, x.dt_sub_desc,
-       x.exp_cstm_sup_code, x.dt_cstm_sup_code, x.exp_cstm_sub_code, x.dt_cstm_sub_code
-FROM DEV_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF x
-WHERE x.presence = 'BOTH'
-QUALIFY ROW_NUMBER() OVER (PARTITION BY x.scenario ORDER BY x.schema_id, x.instr_id) <= 3
-ORDER BY x.scenario, x.schema_id, x.instr_id;
-
--- 4.3 Trace a P2-RN row: which rules matched, in RULE_SK order (pick ids from 4.2)
--- SET V_TRACE_SCHEMA = <schema_id>;  SET V_TRACE_INSTR = '<instr_id>';
--- SELECT r.rule_sk, r.rule_name, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc,
---        c.cond_order, c.logical_oper, c.rule_fld_name, c.rule_oper, c.rule_fld_value
--- FROM DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
--- LEFT JOIN DEV_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c ON c.rule_sk = r.rule_sk
--- WHERE r.schema_id = $V_TRACE_SCHEMA AND r.rule_stat = 'A'
--- ORDER BY r.rule_sk, c.cond_order;
-
-
-/* =============================================================================
-   5. CUST_SK consistency
-   p_cust_sk is unused by the proc -> all customers sharing a schema must get
-   identical values for the same instrument (expect 0 rows).
-   ============================================================================= */
-SELECT schema_id, instr_id,
-       COUNT(DISTINCT cust_sk) AS customers,
-       COUNT(DISTINCT HASH(supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
-                           cstm_supcatg_code, cstm_subcatg_code)) AS distinct_results
-FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-GROUP BY schema_id, instr_id
-HAVING COUNT(DISTINCT HASH(supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
-                           cstm_supcatg_code, cstm_subcatg_code)) > 1
-LIMIT 100;
-
-
-/* =============================================================================
-   6. Optional: compare with the old proc-loaded table
-   Old table key has no CUST_SK, so compare on (schema, instr, rptg) and only
-   for instruments present in both. Differences here can be old-proc gaps
-   (stale rows, zero-condition rule handling), not DT errors - confirm with 3.x.
-   ============================================================================= */
-WITH dt AS (
-    SELECT DISTINCT schema_id, instr_id, rptg_type, iss_type, supcatg_code, subcatg_code,
-           supcatg_desc, subcatg_desc, cstm_supcatg_code, cstm_subcatg_code
-    FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_DY
-    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-),
-old AS (
-    SELECT DISTINCT schema_id, instr_id, rptg_type, iss_type, supcatg_code, subcatg_code,
-           supcatg_desc, subcatg_desc, cstm_supcatg_code, cstm_subcatg_code
-    FROM DEV_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG
-    WHERE ($V_SCHEMA_ID IS NULL OR schema_id = $V_SCHEMA_ID)
-      AND instr_id IN (SELECT instr_id FROM dt)
-)
-SELECT 'ONLY_IN_OLD' AS side, * FROM (SELECT * FROM old EXCEPT SELECT * FROM dt)
-UNION ALL
-SELECT 'ONLY_IN_DT'  AS side, * FROM (
-    SELECT * FROM dt
-    WHERE (schema_id, instr_id) IN (SELECT schema_id, instr_id FROM old)
-    EXCEPT
-    SELECT * FROM old)
-LIMIT 200;
-*
-ø�� bb66eb4c3a769046d28733efc0bc191e
 �-
 PROD SETUP.sql�--- =====================================================================
 -- PROD SETUP for retail_project  (GitHub Actions -> PROD account)
