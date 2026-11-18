@@ -24,3 +24,5 @@
 -- 23. What latest features have you learned about recently?
 -- 24. Data quality and data freshness checks in Snowflake
 -- 25. How to create a Snowpipe and what steps are involved?
+--26 . How to get that PII columns info
+--27. MCP connectiovity and testing
