@@ -1,0 +1,26 @@
+-- Snowflake Architect Interview Questions
+-- 1.  How to create an Agent in Snowflake?
+-- 2.  What's Cortex Search?
+-- 3.  What's Cortex Analyst?
+-- 4.  Semantic Model
+-- 5.  Semantic View
+-- 6.  Difference between Semantic Model vs Semantic View
+-- 7.  Use case: some data in files and some data in tables - how do I share it with a chatbot?
+-- 8.  What else is there other than Streamlit app in Snowflake for front end?
+-- 9.  What's CoWork?
+-- 10. Agent creation - what all is required?
+-- 11. How to reduce Time Travel?
+-- 12. How to reduce/optimise storage in Snowflake; how to get the overall storage of tables?
+-- 13. How would a dynamic table be created with multiple warehouses?
+-- 14. What's an Adaptive Warehouse?
+-- 15. Difference between Gen1 vs Gen2 warehouse; why should we move?
+-- 16. What's CoWork? (duplicate of #9)
+-- 17. What benefit can we get from Openflow compared to ETL?
+-- 18. What's a network policy in Snowflake and how does it need to be configured?
+-- 19. For Cortex Agents cost, what factors are involved?
+-- 20. How do you identify PII columns in Snowflake and know who accessed those tables?
+-- 21. Warehouse optimisation techniques; how to create a warehouse and on what basis?
+-- 22. If queries are queuing, how can we optimise - when already using a dedicated multi-cluster warehouse?
+-- 23. What latest features have you learned about recently?
+-- 24. Data quality and data freshness checks in Snowflake
+-- 25. How to create a Snowpipe and what steps are involved?
