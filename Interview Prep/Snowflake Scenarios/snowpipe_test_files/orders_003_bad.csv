@@ -1,0 +1,3 @@
+order_id,customer,amount,order_ts
+6,Frank,abc,2026-11-22 12:00:00
+7,Grace,20.00,2026-11-22 12:05:00

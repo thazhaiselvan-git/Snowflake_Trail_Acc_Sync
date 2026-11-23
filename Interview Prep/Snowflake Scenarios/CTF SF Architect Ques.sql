@@ -16,13 +16,21 @@
 -- 15. Difference between Gen1 vs Gen2 warehouse; why should we move?
 -- 16. What's CoWork? (duplicate of #9)
 -- 17. What benefit can we get from Openflow compared to ETL?
--- 18. What's a network policy in Snowflake and how does it need to be configured?
+-- 18. What's a network policy in Snowflake and how does it need to be configured? ok
 -- 19. For Cortex Agents cost, what factors are involved?
 -- 20. How do you identify PII columns in Snowflake and know who accessed those tables?
 -- 21. Warehouse optimisation techniques; how to create a warehouse and on what basis?
 -- 22. If queries are queuing, how can we optimise - when already using a dedicated multi-cluster warehouse?
 -- 23. What latest features have you learned about recently?
--- 24. Data quality and data freshness checks in Snowflake
--- 25. How to create a Snowpipe and what steps are involved?
---26 . How to get that PII columns info
+-- 24. Data quality and data freshness checks in Snowflake -- Completed
+-- 25. How to create a Snowpipe and what steps are involved? -- Partially completed.
+--26 . How to get that PII columns info   -- completed Fully
 --27.  MCP connectiovity and testing
+---28 Create One Skill and share across the team
+---29. QAS and SOS with example 
+---30.Data Modelling and Types of Dimensions and Facts Theory
+---31. Dynamic table Initial WH alone bigger and then next refresh on smaller WH.
+--32 . JSON file - File exceed issue in one col
+
+
+----Interview Prep/Snowflake Scenarios
