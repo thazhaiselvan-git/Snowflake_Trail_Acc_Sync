@@ -1,0 +1,111 @@
+name: SALES_SV
+description: ShopSmart sales semantic view
+tables:
+  - name: CUSTOMERS
+    synonyms:
+      - clients
+      - buyers
+    description: Customer master
+    base_table:
+      database: SF_SCENARIO_BASED_LEARNING
+      schema: CORTEX_AI
+      table: CUSTOMERS
+    primary_key:
+      columns:
+        - CUSTOMER_ID
+    dimensions:
+      - name: CUSTOMER_NAME
+        expr: CUSTOMER_NAME
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: REGION
+        synonyms:
+          - area
+          - zone
+        expr: REGION
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: SEGMENT
+        expr: SEGMENT
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+  - name: ORDERS
+    description: One row per order
+    base_table:
+      database: SF_SCENARIO_BASED_LEARNING
+      schema: CORTEX_AI
+      table: ORDERS
+    primary_key:
+      columns:
+        - ORDER_ID
+    dimensions:
+      - name: ORDER_DATE
+        expr: ORDER_DATE
+        data_type: DATE
+        access_modifier: public_access
+      - name: ORDER_MONTH
+        expr: "DATE_TRUNC('MONTH', ORDER_DATE)"
+        data_type: DATE
+        access_modifier: public_access
+      - name: STATUS
+        description: "DELIVERED, RETURNED or CANCELLED"
+        expr: STATUS
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+    facts:
+      - name: ORDER_AMOUNT
+        description: Order value in USD
+        expr: AMOUNT
+        data_type: "NUMBER(10,2)"
+        access_modifier: public_access
+      - name: ORDER_QTY
+        expr: QUANTITY
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+    metrics:
+      - name: AVG_ORDER_VALUE
+        expr: AVG(orders.order_amount)
+        access_modifier: public_access
+      - name: ORDER_COUNT
+        expr: COUNT(orders.ORDER_ID)
+        access_modifier: public_access
+      - name: RETURN_COUNT
+        expr: COUNT_IF(orders.STATUS = 'RETURNED')
+        access_modifier: public_access
+      - name: TOTAL_REVENUE
+        synonyms:
+          - sales
+          - revenue
+        expr: SUM(orders.order_amount)
+        access_modifier: public_access
+  - name: PRODUCTS
+    description: Product catalog
+    base_table:
+      database: SF_SCENARIO_BASED_LEARNING
+      schema: CORTEX_AI
+      table: PRODUCTS
+    primary_key:
+      columns:
+        - PRODUCT_ID
+    dimensions:
+      - name: CATEGORY
+        expr: CATEGORY
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+      - name: PRODUCT_NAME
+        expr: PRODUCT_NAME
+        data_type: VARCHAR(16777216)
+        access_modifier: public_access
+relationships:
+  - name: ORDERS_TO_CUSTOMERS
+    left_table: ORDERS
+    right_table: CUSTOMERS
+    relationship_columns:
+      - left_column: CUSTOMER_ID
+        right_column: CUSTOMER_ID
+  - name: ORDERS_TO_PRODUCTS
+    left_table: ORDERS
+    right_table: PRODUCTS
+    relationship_columns:
+      - left_column: PRODUCT_ID
+        right_column: PRODUCT_ID

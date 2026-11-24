@@ -1,0 +1,7 @@
+version: 1
+artifacts:
+  - path: SALES_SV.sv.yaml
+    type: semantic_view
+    targets:
+      default:
+        object: SF_SCENARIO_BASED_LEARNING.CORTEX_AI.SALES_SV
