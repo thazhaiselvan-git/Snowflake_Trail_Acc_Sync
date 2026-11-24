@@ -2,7 +2,7 @@
 -- DATA ENGINEER SQL PATTERNS (Snowflake)
 -- Run SETUP once, then each scenario independently
 -- =====================================================
-USE SCHEMA SQL_LEARNING.SQL_LEARNING_SCHEMA;
+USE SCHEMA SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA;
 
 -- =====================================================
 -- SETUP

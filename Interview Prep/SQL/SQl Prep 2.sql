@@ -6,7 +6,7 @@
 -- ============================================================
 -- PART 1: DDL — CREATE SAMPLE TABLES
 -- ============================================================
-
+USE SCHEMA SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA;
 CREATE TRANSIENT TABLE departments (
     department_id   NUMBER,
     department_name VARCHAR

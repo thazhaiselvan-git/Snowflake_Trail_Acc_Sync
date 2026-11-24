@@ -2,9 +2,9 @@
 -- 1.  How to create an Agent in Snowflake?
 -- 2.  What's Cortex Search?
 -- 3.  What's Cortex Analyst?
--- 4.  Semantic Model
--- 5.  Semantic View
--- 6.  Difference between Semantic Model vs Semantic View
+-- 4.  Semantic Model - Completed
+-- 5.  Semantic View - Completed
+-- 6.  Difference between Semantic Model vs Semantic View - Completed
 -- 7.  Use case: some data in files and some data in tables - how do I share it with a chatbot?
 -- 8.  What else is there other than Streamlit app in Snowflake for front end?
 -- 9.  What's CoWork?

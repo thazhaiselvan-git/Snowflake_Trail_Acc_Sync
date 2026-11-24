@@ -26,7 +26,7 @@ USE SCHEMA GIT_DB.INTEGRATIONS;
 CREATE OR REPLACE SECRET GIT_DB.INTEGRATIONS.GITHUB_SECRET
   TYPE = PASSWORD
   USERNAME = 'thazhaiselvan-git'
-  PASSWORD = '<PAT TOKEN>;
+  PASSWORD = <tOKEN>;
 
 -- ---------------------------------------------------------------------
 -- STEP 3: API integration (allows Snowflake to talk to your GitHub account)

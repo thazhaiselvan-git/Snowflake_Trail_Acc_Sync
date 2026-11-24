@@ -1,17 +1,17 @@
 -- =====================================================
 -- SETUP: CREATE + INSERT (idempotent, Snowflake style)
 -- =====================================================
-CREATE DATABASE IF NOT EXISTS SQL_LEARNING;
-CREATE SCHEMA IF NOT EXISTS SQL_LEARNING.SQL_LEARNING_SCHEMA;
-USE SCHEMA SQL_LEARNING.SQL_LEARNING_SCHEMA;
+CREATE DATABASE IF NOT EXISTS SF_SCENARIO_BASED_LEARNING;
+CREATE SCHEMA IF NOT EXISTS SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA;
+USE SCHEMA SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA;
 
-CREATE OR REPLACE TABLE SQL_LEARNING.SQL_LEARNING_SCHEMA.sales (
+CREATE OR REPLACE TABLE SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.sales (
   region    VARCHAR(20),
   sale_date DATE,
   amount    NUMBER(10,2)
 );
 
-INSERT INTO SQL_LEARNING.SQL_LEARNING_SCHEMA.sales VALUES
+INSERT INTO SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.sales VALUES
   ('South','2026-10-01',100),
   ('South','2026-10-02',150),
   ('South','2026-10-03',120),
@@ -22,24 +22,24 @@ INSERT INTO SQL_LEARNING.SQL_LEARNING_SCHEMA.sales VALUES
   ('North','2026-10-03',400),
   ('North','2026-10-05',350);   -- 10-04 missing on purpose (date gap scenario)
 
-CREATE OR REPLACE TABLE SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary (
+CREATE OR REPLACE TABLE SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary (
   emp_id NUMBER,
   year   NUMBER,
   salary NUMBER(12,2)
 );
 
-INSERT INTO SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary VALUES
+INSERT INTO SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary VALUES
   (101,2023,600000),(101,2024,660000),(101,2025,726000),   -- 10% every year
   (102,2023,800000),(102,2024,840000),(102,2025,882000),   -- 5% every year
   (103,2023,500000),(103,2024,500000),(103,2025,550000);   -- no hike in 2024
 
-CREATE OR REPLACE TABLE SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_rating (
+CREATE OR REPLACE TABLE SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_rating (
   emp_id NUMBER,
   salary NUMBER(12,2),
   rating VARCHAR(1)
 );
 
-INSERT INTO SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_rating VALUES
+INSERT INTO SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_rating VALUES
   (101,726000,'A'),
   (102,882000,'B'),
   (103,550000,'C');
@@ -48,6 +48,8 @@ INSERT INTO SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_rating VALUES
 -- SCENARIO 1: Running total + 3-row rolling sum/avg
 -- (named WINDOW clause is not supported; frames inline)
 -- =====================================================
+SELECT * FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.sales;
+
 SELECT region, sale_date, amount,
   SUM(amount) OVER (PARTITION BY region ORDER BY sale_date
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)   AS running_total,
@@ -58,7 +60,7 @@ SELECT region, sale_date, amount,
         ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)           AS rolling_3row_sum,
   ROUND(AVG(amount) OVER (PARTITION BY region ORDER BY sale_date
         ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 2)       AS rolling_3row_avg
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.sales
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.sales
 ORDER BY region, sale_date;
 
 -- =====================================================
@@ -71,7 +73,7 @@ SUM(amount) OVER (PARTITION BY region ORDER BY sale_date
     
   SUM(amount) OVER (PARTITION BY region ORDER BY sale_date
         RANGE BETWEEN INTERVAL '2 DAYS' PRECEDING AND CURRENT ROW) AS rolling_3day_sum
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.sales
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.sales
 ORDER BY region, sale_date;
 
 -- =====================================================
@@ -81,8 +83,9 @@ ORDER BY region, sale_date;
 SELECT emp_id, year, salary,
   LAG(salary) OVER (PARTITION BY emp_id ORDER BY year)           AS prev_salary,
   salary - prev_salary                                           AS hike_amt,
-  ROUND(DIV0NULL(salary - prev_salary, prev_salary) * 100, 2)    AS hike_pct
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+  ---ROUND(DIV0NULL(salary - prev_salary, prev_salary) * 100, 2)    AS hike_pct
+  ROUND((salary - prev_salary) / NULLIF(prev_salary, 0) * 100,2) AS hike_pct
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
 ORDER BY emp_id, year;   -- Snowflake allows reusing column aliases in the same SELECT
 
 -- =====================================================
@@ -92,7 +95,7 @@ SELECT emp_id, year, salary,
   LAG(salary) OVER (PARTITION BY emp_id ORDER BY year)           AS prev_salary,
   salary - prev_salary                                           AS hike_amt,
   ROUND(DIV0NULL(salary - prev_salary, prev_salary) * 100, 2)    AS hike_pct
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
 QUALIFY prev_salary IS NOT NULL
 ORDER BY emp_id, year;
 
@@ -105,7 +108,7 @@ WITH h AS (
   LAG(salary) OVER (PARTITION BY emp_id ORDER BY year)           AS prev_salary,
   salary - prev_salary                                           AS hike_amt,
   ROUND(DIV0NULL(salary - prev_salary, prev_salary) * 100, 2)    AS hike_pct
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
 )
 SELECT emp_id, year, ROUND(hike_pct, 2) AS hike_pct
 FROM h
@@ -120,7 +123,7 @@ ORDER BY year;
 WITH h AS (
   SELECT emp_id, salary,
     LAG(salary) OVER (PARTITION BY emp_id ORDER BY year) AS prev_salary
-  FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+  FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
   QUALIFY prev_salary IS NOT NULL
 )
 SELECT emp_id
@@ -132,7 +135,7 @@ HAVING BOOLAND_AGG(salary > prev_salary);
 -- SCENARIO 7: Employee-years with NO hike
 -- =====================================================
 SELECT emp_id, year
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
 QUALIFY salary <= LAG(salary) OVER (PARTITION BY emp_id ORDER BY year);
 
 -- =====================================================
@@ -141,9 +144,9 @@ QUALIFY salary <= LAG(salary) OVER (PARTITION BY emp_id ORDER BY year);
 -- =====================================================
 SELECT emp_id, salary, rating,
   salary * DECODE(rating, 'A', 1.15, 'B', 1.10, 1.05) AS new_salary
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_rating;
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_rating;
 
-SELECT *  FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_rating;
+SELECT *  FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_rating;
 -- =====================================================
 -- SCENARIO 9: Project next 3 years at 10%
 -- GENERATOR builds the year rows (no hard-coded columns)
@@ -151,7 +154,7 @@ SELECT *  FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_rating;
 SELECT s.emp_id,
        2025 + g.n                              AS proj_year,
        ROUND(s.salary * POWER(1.10, g.n), 2)   AS proj_salary
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary s
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary s
 CROSS JOIN (SELECT SEQ4() + 1 AS n FROM TABLE(GENERATOR(ROWCOUNT => 3))) g
 WHERE s.year = 2025
 ORDER BY s.emp_id, proj_year;
@@ -165,7 +168,7 @@ SELECT emp_id,
   MAX_BY(salary, year)                                                  AS latest_salary,
   (DIV0NULL(MAX_BY(salary, year), MIN_BY(salary, year))) as Ref,
   ROUND((DIV0NULL(MAX_BY(salary, year), MIN_BY(salary, year)) - 1) * 100, 2) AS total_growth_pct
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
 GROUP BY emp_id
 ORDER BY emp_id;
 
@@ -176,5 +179,5 @@ SELECT emp_id, year, salary,
   SUM(salary) OVER (PARTITION BY emp_id ORDER BY year
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_paid,
   LEAD(salary) OVER (PARTITION BY emp_id ORDER BY year)   AS next_year_salary
-FROM SQL_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
+FROM SF_SCENARIO_BASED_LEARNING.SQL_LEARNING_SCHEMA.emp_salary
 ORDER BY emp_id, year;
