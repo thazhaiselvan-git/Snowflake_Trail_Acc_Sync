@@ -1,4 +1,755 @@
 
+��
+.Interview Prep/IBM_Snowflake_Interview_Prep.md�# IBM – Data Engineer (Snowflake Data Platforms) – Interview Prep Guide
+
+> Role level: 10–12 yrs | Consulting / client-facing | Focus: Snowflake + Data Engineering + Cloud + Data & AI
+
+---
+
+## 0. How to Use This Guide
+
+| Day | Focus | Sections |
+|-----|-------|----------|
+| 1 | Architecture, performance, cost | 1, 2 |
+| 2 | Pipelines + SQL practice | 3, 7 |
+| 3 | Security, governance, sharing | 4, 5 |
+| 4 | Cortex AI / ML (build a mini demo) | 6 |
+| 5 | Data modeling, migration, cloud, DevOps | 8, 9 |
+| 6 | Architecture whiteboard + STAR stories | 10, 11 |
+| 7 | Mock interview using Q&A bank | 12 |
+
+---
+
+## 1. Snowflake Architecture
+
+**Three layers**
+1. **Storage** – columnar, compressed, immutable **micro-partitions** (50–500 MB uncompressed) on cloud object storage.
+2. **Compute** – **virtual warehouses** (independent MPP clusters). Scale up (size) for complex queries; scale out (multi-cluster) for concurrency.
+3. **Cloud Services** – auth, metadata, optimizer, transactions, security, result cache.
+
+**Why it matters:** storage & compute scale independently → workload isolation (ETL vs BI vs DS warehouses), pay-per-second, no contention.
+
+**Table types**
+| Type | Time Travel | Fail-safe | Use |
+|------|-------------|-----------|-----|
+| Permanent | 0–90 days (Enterprise) | 7 days | Prod data |
+| Transient | 0–1 day | None | Staging / reproducible data |
+| Temporary | 0–1 day | None | Session-only |
+
+**Key features to explain**
+- **Zero-copy cloning** – metadata-only copy; great for dev/test environments.
+- **Time Travel** – `AT(OFFSET => -3600)`, `BEFORE(STATEMENT => '<qid>')`, `UNDROP TABLE`.
+- **Fail-safe** – 7 days, Snowflake-support recovery only.
+
+```sql
+CREATE DATABASE dev_db CLONE prod_db;
+SELECT * FROM orders AT(OFFSET => -60*60);
+UNDROP TABLE orders;
+```
+
+### 1a. Micro-partitions – deep dive
+
+**Columnar** – values stored column by column, not row by row.
+```
+Row store : [1,Asha,Exec,300000] [2,Ravi,Eng,180000] ...
+Columnar  : emp_id [1,2,3] | name [Asha,Ravi,Meena] | dept [Exec,Eng,Eng] | salary [...]
+```
+→ `SELECT AVG(salary)` reads only the salary column. 100 columns, 2 used ≈ 2% of the data read.
+
+**Compressed** – same-type, repetitive column values shrink well; Snowflake picks the encoding per column automatically.
+| Technique | Example |
+|-----------|---------|
+| Dictionary | `[Exec, Eng, Eng]` → `{0=Exec,1=Eng}` + `[0,1,1]` |
+| Run-length | `[Eng, Eng, Eng, Eng]` → `Eng × 4` |
+| Delta | dates `[10-01, 10-02, 10-03]` → start + `[+1,+1]` |
+
+→ Lower storage bill (billed on compressed size) + less I/O.
+
+**Immutable** – never edited in place. `UPDATE`/`DELETE` write **new** micro-partitions and retire the old ones → enables Time Travel, cloning, consistent reads.
+
+**Metadata per micro-partition** (kept in Cloud Services): min/max per column, distinct count, NULL count, row count.
+- **Pruning**: `WHERE sale_date = '2026-10-03'` skips every partition whose min/max range excludes that date.
+- **Metadata-only answers**: `COUNT(*)`, `MIN`, `MAX` often need no warehouse.
+
+**Clustering**
+- Data is naturally clustered in **load order** (e.g. by date when loaded daily).
+- Over time DML scatters values → overlapping min/max ranges → poor pruning.
+- **Clustering key** + **Automatic Clustering** (serverless, billed) reorganizes partitions.
+- Health metrics: **clustering depth** (lower = better), overlaps.
+
+```sql
+ALTER TABLE sales.fact_orders CLUSTER BY (order_date, region);
+SELECT SYSTEM$CLUSTERING_INFORMATION('sales.fact_orders', '(order_date)');
+SELECT SYSTEM$CLUSTERING_DEPTH('sales.fact_orders', '(order_date)');
+ALTER TABLE sales.fact_orders SUSPEND RECLUSTER;   -- pause cost
+```
+
+**Good clustering key:** frequently filtered/joined column, enough distinct values to prune but not unique (e.g. `DATE`, not `TIMESTAMP` or ID – use `TO_DATE(ts)`), max 3–4 columns, low → high cardinality order.
+
+**Check pruning in Query Profile:** *Partitions scanned* vs *Partitions total* on the TableScan operator.
+
+**How rows and columns are laid out (hybrid columnar / PAX)** – rows are grouped horizontally into micro-partitions (load order), and **inside** each one every column is a separate compressed block with its own min/max. Both happen at write time, not in two steps.
+```
+              col_1  col_2  col_3 ... col_100
+            ┌──────┬──────┬──────┬───┬───────┐
+MP1 rows    │ ███  │ ███  │ ███  │...│  ███  │   ← each █ = one compressed column block
+1–200K      ├──────┼──────┼──────┼───┼───────┤
+MP2 rows    │ ███  │ ███  │ ███  │...│  ███  │
+200K–400K   └──────┴──────┴──────┴───┴───────┘
+```
+Rows → **pruning** (skip micro-partitions). Columns → **projection** (read only needed columns).
+
+**Real-world example – online store `orders` table**
+
+Setup: 100 columns, ~1M orders/day loaded nightly, 30 days → 30M rows ≈ **300 micro-partitions** (assume ~10 per day).
+```
+Day 1  (Nov 1)  → MP1   … MP10    order_date min/max: Nov 1
+Day 2  (Nov 2)  → MP11  … MP20    order_date min/max: Nov 2
+...
+Day 30 (Nov 30) → MP291 … MP300   order_date min/max: Nov 30
+```
+
+*Query A – revenue on Nov 15*
+```sql
+SELECT SUM(amount) FROM orders WHERE order_date = '2026-11-15';
+```
+1. **Pruning** (metadata only): MP1–140 and MP151–300 skipped → read **10 of 300** micro-partitions.
+2. **Columnar**: inside those 10, open only `order_date` + `amount` → **2 of 100** columns.
+→ reads ≈ 0.07 % of the table.
+
+*Query B – revenue from Chennai*
+```sql
+SELECT SUM(amount) FROM orders WHERE city = 'Chennai';
+```
+Chennai orders arrive every day → every micro-partition's `city` min/max covers "Chennai" → **no pruning (300 of 300)**. Columnar still helps (2 of 100 columns).
+Fix *only if* this query is frequent and the table is large: `ALTER TABLE orders CLUSTER BY (city);` → Automatic Clustering groups Chennai rows into few micro-partitions (costs credits).
+
+| Query | Pruning (row groups) | Columnar (column blocks) |
+|-------|----------------------|--------------------------|
+| Revenue on Nov 15 | 10 / 300 read | 2 / 100 columns |
+| Revenue from Chennai | 300 / 300 read | 2 / 100 columns |
+
+> Analogy: a library with one shelf per day's newspapers. "Nov 15" → go to one shelf, read only the sports page. "Every Chennai article" → check every shelf, but still read only that page.
+
+### 1b. Zero-copy cloning – what happens in the backend
+
+```sql
+CREATE TABLE emp_clone CLONE emp;
+```
+
+**Step 1 – clone = metadata copy.** Cloud Services copies the table's list of micro-partition pointers. No data read or written, no warehouse needed, seconds even for TBs. **Extra storage = 0.**
+```
+emp        ──►  [MP1] [MP2] [MP3]
+emp_clone  ──►  [MP1] [MP2] [MP3]   (same files, new pointer list)
+```
+
+**Step 2 – copy-on-write.** Partitions are immutable, so a change on either side writes a new partition for that side only.
+```sql
+UPDATE emp_clone SET salary = salary * 1.1 WHERE dept = 'Eng';   -- rows in MP2
+```
+```
+emp        ──►  [MP1] [MP2]  [MP3]
+emp_clone  ──►  [MP1] [MP2'] [MP3]   ← only MP2' is new storage
+```
+
+**Step 3 – billing.** Pay only for partitions new/changed after the clone. Shared partitions billed once. Dropping the source keeps shared partitions alive (and billed) while the clone references them.
+
+**What is / isn't carried over**
+| Item | Cloned? |
+|------|---------|
+| Data, structure, clustering key | Yes (shared partitions) |
+| Grants on the cloned table | No – unless `COPY GRANTS` |
+| Grants on child objects (database / schema clone) | Yes |
+| Source Time Travel history | No – clone history starts at clone time |
+| `COPY INTO` load history | No – re-running COPY may reload the same files |
+| Streams (table clone) | No; in DB/schema clones yes, but unconsumed changes are lost |
+| Tasks (DB/schema clone) | Yes, created **suspended** |
+| Stages (DB/schema clone) | External named stages: yes. Internal named stages: only with `INCLUDE INTERNAL STAGES`. Table stages: cloned but empty |
+| Pipes (DB/schema clone) | Pipes on external stages: yes (paused). Pipes on internal stages: no |
+
+**Clone + Time Travel (recovery pattern)**
+```sql
+CREATE TABLE emp_before_bug CLONE emp AT (OFFSET => -3600);              -- 1 hour ago
+CREATE TABLE emp_before_bug CLONE emp BEFORE (STATEMENT => '<query_id>'); -- before bad DML
+CREATE DATABASE dev_db CLONE prod_db AT (TIMESTAMP => '2026-11-01 00:00'::TIMESTAMP_LTZ);
+```
+
+**Clone + swap (fix-and-replace pattern)**
+```sql
+CREATE TABLE orders_fix CLONE orders;
+-- fix data in orders_fix, validate
+ALTER TABLE orders SWAP WITH orders_fix;   -- atomic, readers see old or new
+```
+
+**Typical uses:** dev/QA from prod in seconds, test a risky change on a clone, point-in-time backup before a release, recovery after bad DML.
+
+**Interview one-liners**
+- *Micro-partitions:* "Immutable, columnar, compressed storage units with min/max metadata per column, so queries read only needed columns and skip non-matching partitions."
+- *Clone:* "A metadata copy pointing to the same immutable micro-partitions – instant, no extra storage; only partitions changed afterwards in either object are written and billed."
+
+---
+
+## 2. Performance Tuning & Cost Optimization
+
+**Diagnose a slow query (say this sequence):**
+1. Open **Query Profile** → find most expensive operator.
+2. Check **partitions scanned vs total** → poor pruning?
+3. Check **bytes spilled** to local/remote → warehouse too small.
+4. Check **exploding joins**, missing filters, `SELECT *`.
+5. Check **queuing** → multi-cluster / separate warehouse.
+
+**Levers**
+| Problem | Fix |
+|---------|-----|
+| Poor pruning on large table | Clustering key, filter on clustered cols |
+| Point lookups / selective filters | Search Optimization Service |
+| Repeated expensive aggregations | Materialized views / Dynamic Tables |
+| Spilling | Bigger warehouse, reduce data early |
+| Concurrency queuing | Multi-cluster warehouse |
+| Unpredictable large scans | Query Acceleration Service |
+
+**Caches:** Result cache (24h, cloud services) → Local disk/warehouse cache (lost on suspend) → Metadata cache (COUNT/MIN/MAX free).
+
+**Cost control**
+- Auto-suspend 60s, auto-resume, right-size warehouses.
+- **Resource monitors** (credit quota, notify/suspend) and **Budgets**.
+- Separate warehouses per workload; tag objects/queries for chargeback.
+- Monitor via `SNOWFLAKE.ACCOUNT_USAGE`.
+
+```sql
+CREATE RESOURCE MONITOR rm_etl WITH CREDIT_QUOTA = 500
+  TRIGGERS ON 80 PERCENT DO NOTIFY ON 100 PERCENT DO SUSPEND;
+ALTER WAREHOUSE etl_wh SET RESOURCE_MONITOR = rm_etl;
+
+-- Top credit consumers last 30 days
+SELECT warehouse_name, SUM(credits_used) credits
+FROM snowflake.account_usage.warehouse_metering_history
+WHERE start_time >= DATEADD(day,-30,CURRENT_TIMESTAMP())
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- Clustering health
+SELECT SYSTEM$CLUSTERING_INFORMATION('sales.fact_orders','(order_date)');
+```
+
+### 2a. Search Optimization Service (SOS) & Query Acceleration Service (QAS)
+
+**SOS – index-like structure for needle-in-a-haystack lookups**
+
+Problem: `customer_id` is spread across every micro-partition → no pruning.
+```sql
+SELECT * FROM orders WHERE customer_id = 'C123456';   -- 3 rows out of 30M → scans all 300 MPs
+```
+Backend: SOS builds a **search access path** (which micro-partitions contain which values), maintained by serverless compute as data changes.
+```
+'C123456' → MP17, MP242   → read 2 of 300 micro-partitions
+```
+- Works on any column without reordering the table.
+- Good for: equality / `IN`, substring / `LIKE '%x%'`, VARIANT fields, geospatial.
+- Use case: support app looking up one customer's orders in a multi-TB table → tens of seconds → ~1 s.
+- Cost: storage for the access path + serverless maintenance credits (expensive on high-churn tables). Enterprise Edition+.
+```sql
+ALTER TABLE orders ADD SEARCH OPTIMIZATION ON EQUALITY(customer_id), SUBSTRING(email);
+SELECT SYSTEM$ESTIMATE_SEARCH_OPTIMIZATION_COSTS('orders', 'EQUALITY(customer_id)');
+```
+
+**QAS – extra serverless compute for heavy scans**
+
+Problem: one huge outlier query (e.g. a full-year scan) hogs the warehouse; resizing for everyone wastes money.
+Backend: for eligible queries, the large scan + filter + aggregation work is **offloaded to shared serverless compute** in parallel; the warehouse finishes the rest.
+```
+Without QAS: XS warehouse scans 10,000 partitions alone            → 20 min
+With QAS   : serverless workers scan in parallel, XS finishes join/sort → 3 min
+```
+- Good for: ad-hoc / analyst queries with large scans and selective filters or aggregations, unpredictable spikes, keeping a small warehouse size.
+- Not useful: no large scan, or time dominated by joins / sorts.
+- Use case: XS BI warehouse for dashboards; a monthly 40-min finance query is accelerated without upsizing.
+- Cost: serverless credits only while accelerating; capped by the scale factor. Enterprise Edition+.
+```sql
+ALTER WAREHOUSE bi_wh SET ENABLE_QUERY_ACCELERATION = TRUE
+                          QUERY_ACCELERATION_MAX_SCALE_FACTOR = 8;
+SELECT SYSTEM$ESTIMATE_QUERY_ACCELERATION('<query_id>');
+SELECT query_id, eligible_query_acceleration_time
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_ELIGIBLE ORDER BY 2 DESC LIMIT 10;
+```
+
+**QAS eligibility – enabled per warehouse, decided per query**
+
+QAS is switched on at warehouse level, but Snowflake decides **per query at run time** whether to accelerate it. You can't flag individual queries.
+```
+Warehouse bi_wh (QAS enabled)
+ ├─ Dashboard, small scan              → not eligible → warehouse only (no extra cost)
+ ├─ Lookup returning 3 rows             → not eligible → warehouse only (SOS case)
+ └─ Year scan + selective filter / agg  → eligible     → scan offloaded to serverless
+```
+
+| Eligible | Common reasons ineligible |
+|----------|---------------------------|
+| Large scan with a **selective filter** | Scan not large enough (`NO_LARGE_ENOUGH_SCAN`) – no fixed cutoff, depends on plan + warehouse size |
+| Large scan with an **aggregation** | Filter not selective enough, or `GROUP BY` cardinality too high |
+| Part of the plan can run in parallel | Nondeterministic functions (e.g. `SEQ`, `RANDOM`) |
+| Snowflake has high confidence it will be faster | Some `LIMIT` queries – QAS now decides automatically which `LIMIT` queries (even without `ORDER BY`) it can accelerate |
+
+Two meanings of "selective":
+- Selective filter **on a big scan** (`WHERE region = 'APAC'` over a year) → **QAS**.
+- Point lookup returning a few rows (`WHERE customer_id = 'C123'`) → **SOS**, nothing large to offload.
+
+**Targeting specific workloads** – route them to a dedicated warehouse:
+```sql
+CREATE WAREHOUSE bi_wh    WAREHOUSE_SIZE = 'XSMALL';                    -- dashboards, no QAS
+CREATE WAREHOUSE adhoc_wh WAREHOUSE_SIZE = 'XSMALL'
+  ENABLE_QUERY_ACCELERATION = TRUE
+  QUERY_ACCELERATION_MAX_SCALE_FACTOR = 4;                              -- heavy ad-hoc / finance
+USE WAREHOUSE adhoc_wh;                                                 -- in the heavy job's session
+```
+
+**Scale factor (cost control)**
+- Upper bound on serverless compute as a multiple of warehouse size. **Default 8; `0` = no upper bound.**
+- Example: Medium (4 credits/hr) × scale factor 5 → up to 20 extra credits/hr.
+- QAS is enabled by default on **Gen2 standard** and **multi-cluster** warehouses.
+
+**Check eligibility / usage**
+```sql
+-- Before: would this past query benefit? (status, ineligibleReason, estimated times per scale factor)
+SELECT PARSE_JSON(SYSTEM$ESTIMATE_QUERY_ACCELERATION('<query_id>'));
+
+-- After: which queries actually used QAS
+SELECT query_id, query_acceleration_bytes_scanned,
+       query_acceleration_partitions_scanned, query_acceleration_upper_limit_scale_factor
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE query_acceleration_partitions_scanned > 0
+ORDER BY start_time DESC LIMIT 20;
+```
+
+**Interview line:** *"QAS is enabled on a warehouse, but Snowflake decides per query at run time – only large scans with selective filters or aggregations get offloaded. To target specific workloads, route them to a dedicated QAS-enabled warehouse and cap spend with the scale factor (default 8)."*
+
+**Which one?**
+| | Clustering key | SOS | QAS |
+|---|---|---|---|
+| Query shape | Range filters (date ranges) | Selective point lookups | Large scans / aggregations |
+| How it helps | Reorders micro-partitions | Lookup structure for pruning | Extra parallel compute |
+| Set on | Table | Table / column | Warehouse |
+| Cost | Reclustering credits | Storage + maintenance | Credits while accelerating |
+
+**Interview line:** *"Clustering for range filters on a few columns, SOS for selective point lookups on any column, QAS when large scans make a few queries far slower than the rest – they can be combined."*
+
+---
+
+## 3. Data Pipelines
+
+### Ingestion options
+| Pattern | Tool | Latency |
+|---------|------|---------|
+| Batch files | `COPY INTO` from stage | Minutes/hours |
+| Continuous files | **Snowpipe** (auto-ingest via S3 SQS / Event Grid / Pub/Sub) | ~1 min |
+| Streaming rows | **Snowpipe Streaming**, Kafka connector | Seconds |
+| SaaS / DB CDC | **Openflow**, Fivetran, partner tools | Varies |
+
+```sql
+CREATE STORAGE INTEGRATION s3_int TYPE=EXTERNAL_STAGE STORAGE_PROVIDER='S3'
+  ENABLED=TRUE STORAGE_AWS_ROLE_ARN='arn:aws:iam::123:role/sf'
+  STORAGE_ALLOWED_LOCATIONS=('s3://my-bucket/raw/');
+
+CREATE STAGE raw_stage URL='s3://my-bucket/raw/' STORAGE_INTEGRATION=s3_int
+  FILE_FORMAT=(TYPE=JSON);
+
+CREATE PIPE raw_pipe AUTO_INGEST=TRUE AS
+  COPY INTO raw.events FROM @raw_stage;
+```
+
+### Transformation / CDC
+**Streams + Tasks** – fine-grained control, procedural logic, custom scheduling.
+```sql
+CREATE STREAM orders_strm ON TABLE raw.orders;
+
+CREATE TASK merge_orders WAREHOUSE=etl_wh SCHEDULE='5 MINUTE'
+  WHEN SYSTEM$STREAM_HAS_DATA('orders_strm') AS
+MERGE INTO silver.orders t USING orders_strm s ON t.id = s.id
+WHEN MATCHED AND s.METADATA$ACTION='DELETE' AND s.METADATA$ISUPDATE=FALSE THEN DELETE
+WHEN MATCHED AND s.METADATA$ACTION='INSERT' THEN UPDATE SET t.amount=s.amount
+WHEN NOT MATCHED AND s.METADATA$ACTION='INSERT' THEN INSERT (id,amount) VALUES (s.id,s.amount);
+
+ALTER TASK merge_orders RESUME;
+```
+
+**Dynamic Tables** – declarative; define the SELECT + `TARGET_LAG`, Snowflake handles incremental refresh & dependency DAG.
+```sql
+CREATE DYNAMIC TABLE gold.daily_sales TARGET_LAG='15 minutes' WAREHOUSE=etl_wh AS
+SELECT order_date, region, SUM(amount) revenue FROM silver.orders GROUP BY 1,2;
+```
+
+**When which?**
+- Dynamic Tables → SQL-expressible transforms, declarative pipelines, less code.
+- Streams+Tasks → procedural logic, calling procs/external functions, exact scheduling, side effects.
+- dbt → team SDLC, testing, docs, lineage (can materialize as dynamic tables; dbt Projects on Snowflake runs natively).
+
+### 3a. Streams & Dynamic Tables – how change tracking works in the backend
+
+**Foundation: every DML creates a new table version.** Micro-partitions are immutable, so each DML writes new partitions and produces a new version (a new partition list). Old versions are kept for the Time Travel retention period.
+```
+v1 (10:00)  orders → [MP1] [MP2]  [MP3]
+   UPDATE a row in MP2  → written as MP2'
+v2 (10:05)  orders → [MP1] [MP2'] [MP3]
+   INSERT new rows      → written as MP4
+v3 (10:10)  orders → [MP1] [MP2'] [MP3] [MP4]
+```
+**Change tracking** (`CHANGE_TRACKING = TRUE`, switched on automatically when a stream is created) adds hidden row-ID/version columns, so Snowflake can match a row in MP2 to the same row in MP2′ and know exactly what changed.
+
+**Streams – a bookmark, not a copy**
+```sql
+CREATE STREAM orders_strm ON TABLE orders;
+```
+- Stores only an **offset** (a pointer to one table version, e.g. v1). **No data.**
+- Querying the stream compares offset version vs current version:
+```
+offset = v1           current = v3
+[MP1][MP2][MP3]   →   [MP1][MP2'][MP3][MP4]
+                       MP1, MP3 unchanged → ignored
+                       MP2 → MP2'         → UPDATE
+                       MP4 new            → INSERTs
+```
+- Returns the **net change** (each changed row once, latest values) plus metadata columns:
+
+| METADATA$ACTION | METADATA$ISUPDATE | Meaning |
+|-----------------|-------------------|---------|
+| INSERT | FALSE | New row |
+| DELETE | FALSE | Deleted row |
+| DELETE + INSERT | TRUE | Update (old image + new image) |
+
+`METADATA$ROW_ID` identifies the row across versions.
+
+- **Offset moves only when a DML that reads the stream commits** (`INSERT`, `MERGE`, ...). A plain `SELECT` does not move it. Trick to consume without loading: `INSERT INTO sink SELECT ... FROM strm WHERE 1 = 0;`
+- **Staleness:** the stream needs the old versions. If not consumed within retention, Snowflake extends retention up to `MAX_DATA_EXTENSION_TIME_IN_DAYS` (default 14); after that the stream becomes **stale** and must be recreated.
+- **Types:** Standard (insert/update/delete, net-change compare) · Append-only (inserts only, cheaper – just lists new partitions) · Insert-only (external / Iceberg tables).
+
+**Dynamic Tables – stream + MERGE + scheduler, managed for you**
+```sql
+CREATE DYNAMIC TABLE daily_sales TARGET_LAG = '15 minutes' WAREHOUSE = etl_wh AS
+SELECT order_date, SUM(amount) AS revenue FROM orders GROUP BY order_date;
+```
+On each refresh:
+1. **Scheduler** picks the refresh time so data is never older than `TARGET_LAG`; chained DTs refresh in dependency order, reading the same point in time.
+2. **Reads changes since the last refresh** – the DT remembers the source versions it last read (like a stream offset) and uses change tracking to get only inserted/updated/deleted rows.
+3. **Incremental refresh** – runs the query on the changes only and merges the result in (only Nov 15 changed → only the Nov 15 row of `daily_sales` is recomputed).
+4. **Full refresh** – when the query can't be computed incrementally, the whole result is recomputed.
+5. **Commits and records the new versions read**, ready for the next refresh.
+```
+orders v5 ──(changes v5..v8)──► incremental query ──MERGE──► daily_sales
+          remembers "last read = v8"
+```
+Check behaviour: `SHOW DYNAMIC TABLES` (`refresh_mode`), `DYNAMIC_TABLE_REFRESH_HISTORY`.
+
+**Side by side**
+| | Stream | Dynamic Table |
+|---|--------|---------------|
+| Stores | Offset only (no data) | Full result table |
+| Change detection | Offset version vs current version | Same change tracking, internal |
+| Who applies changes | You (Task + MERGE) | Snowflake (incremental / full refresh) |
+| Position moves | When a DML reading it commits | After each successful refresh |
+| Scheduling | You (Task schedule / `WHEN SYSTEM$STREAM_HAS_DATA`) | Automatic, from `TARGET_LAG` |
+| Best for | Procedural logic, calling procs, exact control | SQL-expressible transforms, no orchestration code |
+
+**Interview one-liner:** *"A stream is a bookmark on a table version. Querying it compares that version with the current micro-partitions using change-tracking row IDs and returns net changes; the bookmark moves only when a DML reading it commits. A dynamic table uses the same change tracking internally: it remembers the source versions it last read, applies only the changes (or recomputes fully when it must), and Snowflake schedules it to meet the target lag."*
+
+### Semi-structured
+```sql
+SELECT v:customer.id::STRING cust_id, f.value:sku::STRING sku
+FROM raw.events, LATERAL FLATTEN(input => v:items) f;
+```
+
+### Snowpark (Python)
+- DataFrame API pushed down to Snowflake (lazy execution), UDFs/UDTFs/stored procs, vectorized UDFs, Snowpark-optimized warehouses for memory-heavy ML.
+
+### Open formats
+- **Iceberg tables** (Snowflake-managed or external catalog: Glue, Polaris/Open Catalog, Unity) – interoperability with Spark etc.
+
+---
+
+## 4. Security & Governance
+
+**RBAC best practice (explain this pattern):**
+- **Access roles** (privileges on objects, e.g. `SALES_RO`, `SALES_RW`) → granted to **functional roles** (e.g. `ANALYST`, `DATA_ENGINEER`) → granted to users.
+- Roll all custom roles up to `SYSADMIN`. Use `SECURITYADMIN`/`USERADMIN` for grants/users. Minimize `ACCOUNTADMIN`.
+- Use **future grants** and **managed access schemas**; database roles for shareable privilege bundles.
+
+```sql
+CREATE ROLE sales_ro;
+GRANT USAGE ON DATABASE sales TO ROLE sales_ro;
+GRANT USAGE ON ALL SCHEMAS IN DATABASE sales TO ROLE sales_ro;
+GRANT SELECT ON FUTURE TABLES IN DATABASE sales TO ROLE sales_ro;
+GRANT ROLE sales_ro TO ROLE analyst;
+GRANT ROLE analyst TO ROLE sysadmin;
+```
+
+**Column / row protection**
+```sql
+-- Dynamic masking
+CREATE MASKING POLICY pii_email AS (val STRING) RETURNS STRING ->
+  CASE WHEN IS_ROLE_IN_SESSION('PII_ADMIN') THEN val
+       ELSE REGEXP_REPLACE(val,'.+@','*****@') END;
+ALTER TABLE customers MODIFY COLUMN email SET MASKING POLICY pii_email;
+
+-- Row access
+CREATE ROW ACCESS POLICY region_rap AS (region STRING) RETURNS BOOLEAN ->
+  EXISTS (SELECT 1 FROM sec.region_map m
+          WHERE m.role = CURRENT_ROLE() AND m.region = region);
+ALTER TABLE sales ADD ROW ACCESS POLICY region_rap ON (region);
+```
+- **Tag-based masking**: attach masking policy to a tag (e.g. `PII=EMAIL`) → auto-protect every tagged column.
+- **Auto classification** to detect sensitive data.
+- **Auditing**: `ACCESS_HISTORY`, `LOGIN_HISTORY`, lineage in Horizon.
+- **Data quality**: Data Metric Functions (NULL_COUNT, FRESHNESS, custom DMFs).
+
+**Network & auth**
+- Network policies / rules, PrivateLink, SSO (SAML/OAuth), key-pair auth for service users, MFA.
+- Encryption at rest/in transit by default; **Tri-Secret Secure** (customer-managed key); periodic rekeying.
+
+---
+
+## 5. Data Sharing, Replication & DR
+
+- **Secure Data Sharing**: provider grants objects to a **share**; consumer creates DB from share – **no data copy**, live data, consumer pays compute.
+- **Reader accounts** for consumers without Snowflake.
+- **Listings** (private / Marketplace), cross-region via auto-fulfillment.
+- Use **secure views** to share filtered data.
+- **Replication & failover groups** – replicate DBs, roles, warehouses, integrations to another region/cloud; `ALTER FAILOVER GROUP ... PRIMARY` for DR. **Client redirect** via connection URLs.
+- **Data Clean Rooms** – privacy-preserving joins between parties.
+
+```sql
+CREATE SHARE sales_share;
+GRANT USAGE ON DATABASE sales TO SHARE sales_share;
+GRANT USAGE ON SCHEMA sales.public TO SHARE sales_share;
+GRANT SELECT ON VIEW sales.public.v_partner_sales TO SHARE sales_share;
+ALTER SHARE sales_share ADD ACCOUNTS = partnerorg.partneracct;
+```
+
+---
+
+## 6. Data & AI on Snowflake (heavily emphasized in the JD)
+
+| Capability | What it does | Example use case |
+|-----------|--------------|------------------|
+| **Cortex AI functions** (`AI_COMPLETE`, `AI_CLASSIFY`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE_AGG`, `AI_FILTER`, `AI_TRANSLATE`) | LLMs in SQL | Ticket triage, review sentiment |
+| **AI_PARSE_DOCUMENT** | OCR / layout from PDFs | Invoice & contract processing |
+| **Cortex Search** | Hybrid vector + keyword search service | RAG chatbot over docs |
+| **Cortex Analyst + Semantic Views** | Natural language → SQL | Self-service BI for business users |
+| **Cortex Agents / Snowflake Intelligence** | Orchestrate Analyst + Search + tools | Enterprise assistant |
+| **Snowflake ML** (Feature Store, Model Registry, ML Jobs, Observability) | End-to-end ML | Churn / demand forecasting |
+| **SPCS** (Container Services) | Run containers/GPUs | Custom models, apps |
+| **Streamlit in Snowflake** | Apps on data | UI for AI use cases |
+
+```sql
+SELECT ticket_id,
+       AI_CLASSIFY(body, ['billing','technical','account']):labels[0]::STRING AS category,
+       AI_SENTIMENT(body) AS sentiment
+FROM support.tickets;
+
+SELECT AI_COMPLETE('claude-3-5-sonnet',
+  'Summarize this complaint in 1 line: ' || body) FROM support.tickets LIMIT 5;
+```
+
+**Reference RAG architecture (be able to draw):**
+`Stage (PDFs)` → `AI_PARSE_DOCUMENT` → chunk (`SPLIT_TEXT_RECURSIVE_CHARACTER`) → chunk table → `CREATE CORTEX SEARCH SERVICE` → Cortex Agent (+ Analyst over semantic view for structured data) → Streamlit / Snowflake Intelligence UI. Governance: RBAC on search service, masking on source tables, AI cost monitoring.
+
+> Tip: Build this mini demo in your trial account before the interview – speaking from hands-on experience is a big differentiator.
+
+---
+
+## 7. SQL Practice (expect live coding)
+
+```sql
+-- 1. Dedup: latest record per key
+SELECT * FROM customers
+QUALIFY ROW_NUMBER() OVER (PARTITION BY cust_id ORDER BY updated_at DESC) = 1;
+
+-- 2. Running total & 7-day moving average
+SELECT order_date, revenue,
+  SUM(revenue) OVER (ORDER BY order_date) running_total,
+  AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) ma7
+FROM daily_sales;
+
+-- 3. Nth highest salary per department
+SELECT * FROM emp
+QUALIFY DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary DESC) = 2;
+
+-- 4. Gaps & islands: consecutive login days
+WITH d AS (
+  SELECT user_id, login_date,
+         DATEADD(day, -ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY login_date), login_date) grp
+  FROM (SELECT DISTINCT user_id, login_date FROM logins))
+SELECT user_id, MIN(login_date) start_dt, MAX(login_date) end_dt, COUNT(*) streak
+FROM d GROUP BY user_id, grp;
+
+-- 5. Month-over-month growth
+SELECT month, revenue,
+  (revenue - LAG(revenue) OVER (ORDER BY month)) / NULLIF(LAG(revenue) OVER (ORDER BY month),0) mom_pct
+FROM monthly_sales;
+
+-- 6. Recursive CTE: org hierarchy
+WITH RECURSIVE org AS (
+  SELECT emp_id, mgr_id, name, 1 lvl FROM emp WHERE mgr_id IS NULL
+  UNION ALL
+  SELECT e.emp_id, e.mgr_id, e.name, o.lvl+1 FROM emp e JOIN org o ON e.mgr_id = o.emp_id)
+SELECT * FROM org;
+
+-- 7. SCD Type 2 with MERGE (two-step: expire changed, insert new versions)
+MERGE INTO dim_customer d
+USING (
+  SELECT s.cust_id AS merge_key, s.* FROM stg_customer s
+  UNION ALL
+  SELECT NULL, s.* FROM stg_customer s
+  JOIN dim_customer d ON s.cust_id = d.cust_id AND d.is_current
+  WHERE s.hash_diff <> d.hash_diff
+) src
+ON d.cust_id = src.merge_key AND d.is_current
+WHEN MATCHED AND d.hash_diff <> src.hash_diff THEN
+  UPDATE SET d.is_current = FALSE, d.end_date = CURRENT_TIMESTAMP()
+WHEN NOT MATCHED THEN
+  INSERT (cust_id, name, city, hash_diff, start_date, end_date, is_current)
+  VALUES (src.cust_id, src.name, src.city, src.hash_diff, CURRENT_TIMESTAMP(), NULL, TRUE);
+
+-- 8. Pivot
+SELECT * FROM (SELECT region, quarter, revenue FROM sales)
+PIVOT (SUM(revenue) FOR quarter IN ('Q1','Q2','Q3','Q4'));
+```
+
+---
+
+## 8. Data Modeling & Warehousing
+
+- **Kimball**: facts (transactional, periodic snapshot, accumulating snapshot) + conformed dimensions; star preferred over snowflake schema in Snowflake (fewer joins, storage cheap).
+- **SCD types**: 0 (fixed), 1 (overwrite), 2 (history rows), 3 (prev column), 6 (hybrid).
+- **Data Vault 2.0**: Hubs (business keys), Links (relationships), Satellites (history) – good for auditable, many-source enterprise integration; insert-only, parallel loads.
+- **Medallion**: Bronze (raw, VARIANT) → Silver (cleansed, conformed) → Gold (business marts / semantic layer).
+- **ELT over ETL** in Snowflake – land raw, transform with in-database compute.
+- Principles: idempotent loads, handle late-arriving data, surrogate keys/hash keys, audit columns, data quality checks, data contracts.
+
+---
+
+## 9. Cloud, Migration & DevOps
+
+**Migration approach (e.g. Teradata / Oracle / Netezza / Hadoop → Snowflake):**
+1. **Assess** – inventory objects, workloads, dependencies, usage; prioritize by value/complexity.
+2. **Plan** – target architecture, RBAC, environments, wave plan.
+3. **Convert code** – SnowConvert / AI-assisted conversion; refactor procedural code (BTEQ, PL/SQL) to Snowflake SQL / Snowpark / dbt.
+4. **Migrate data** – historical bulk load (export to cloud storage → `COPY INTO`), then incremental CDC to sync.
+5. **Validate** – row counts, checksums/aggregates, sample record compare, report reconciliation.
+6. **Parallel run & cutover** – repoint BI/ETL, decommission legacy.
+7. **Optimize** – right-size warehouses, clustering, cost governance.
+
+**Minimal downtime:** bulk historical + CDC catch-up + parallel run + short freeze window for final delta.
+
+**Cloud essentials (pick your strongest – AWS/Azure/GCP):**
+- Object storage (S3/ADLS/GCS), IAM roles & trust policies for storage integrations, KMS, VPC/PrivateLink, event notifications for Snowpipe, orchestration (Airflow, ADF, Step Functions).
+
+**DevOps / IaC:**
+- Git integration, CI/CD (GitHub Actions / Azure DevOps / Jenkins), Terraform Snowflake provider, schemachange / DCM projects, dbt.
+- Env strategy: DEV / QA / PROD via clones; promote via pipelines; automated tests.
+
+---
+
+## 10. Architecture Whiteboard (practice drawing this)
+
+```
+ Sources (ERP, CRM, DBs, APIs, Files, Streams)
+        │  Openflow / Fivetran / Kafka / Snowpipe(Streaming)
+        ▼
+ ┌──────────── SNOWFLAKE ─────────────────────────────────┐
+ │ BRONZE (raw, VARIANT)                                  │
+ │   │ Streams+Tasks / Dynamic Tables / dbt               │
+ │ SILVER (cleansed, conformed, SCD2)                     │
+ │   │                                                    │
+ │ GOLD (star schemas, marts) → Semantic Views            │
+ │                                                        │
+ │ AI: Cortex AI funcs, Cortex Search, Analyst, Agents,   │
+ │     Snowflake ML, SPCS                                 │
+ │ Governance: RBAC, masking/RAP, tags, DMFs, lineage     │
+ │ Ops: Resource monitors, budgets, replication/failover  │
+ └────────────────────────────────────────────────────────┘
+        ▼
+ Consumers: BI (Power BI/Tableau), Streamlit apps,
+ Snowflake Intelligence, Data Sharing / Marketplace
+```
+Talk through: **scalability** (warehouse isolation, multi-cluster), **security** (network, RBAC, masking), **cost** (auto-suspend, monitors), **reliability** (DR replication, monitoring, alerts), **CI/CD**.
+
+---
+
+## 11. Behavioral / Consulting (STAR stories)
+
+Prepare 5 stories with **numbers**:
+| Theme | Prompt |
+|-------|--------|
+| Migration | "Tell me about a large migration you led." |
+| Performance/Cost | "Describe a time you significantly reduced cost or runtime." |
+| Stakeholder | "Time you disagreed with a client on design." |
+| Leadership | "How do you mentor / lead a distributed team?" |
+| Incident | "A production failure and how you handled it." |
+| AI | "An AI/GenAI use case you delivered or would propose." |
+
+**STAR template:** Situation (1 line) → Task (your responsibility) → Action (what *you* did, technical detail) → Result (quantified: %, $, hours, SLA).
+
+**IBM-specific:** IBM Consulting values client focus, delivery excellence, growth mindset, and partner ecosystems (IBM is a Snowflake partner; know watsonx at a high level and how it can complement Snowflake).
+
+**Questions to ask them:**
+- What client industries / use cases will this role support first?
+- Is the work greenfield, migration, or modernization-heavy?
+- How is the Snowflake practice structured (team size, onshore/offshore)?
+- What does success look like in the first 6 months?
+
+---
+
+## 12. Q&A Bank – Short Model Answers
+
+1. **Why Snowflake over a traditional DW?** Separation of storage/compute, elasticity, near-zero maintenance, native semi-structured support, secure sharing, multi-cloud, built-in AI.
+2. **Scale up vs scale out?** Up = bigger size for complex/large queries; out = multi-cluster for concurrency.
+3. **What is a micro-partition / pruning?** Immutable columnar units with min/max metadata; optimizer skips partitions not matching filters.
+4. **When to add a clustering key?** Multi-TB tables, frequent filters on a column, poor pruning, and query patterns justify reclustering cost.
+5. **Stream types?** Standard (insert/update/delete), append-only, insert-only (external/Iceberg). Stream offset advances only when consumed in a DML transaction.
+6. **Snowpipe vs COPY?** Snowpipe is serverless, event-driven, continuous; COPY is batch using your warehouse.
+7. **How to load idempotently?** COPY load metadata (64 days) prevents reload; MERGE on keys; hash diffs.
+8. **Secure view vs normal view?** Secure hides definition and prevents optimizer leaks; required for sharing; may be slightly slower.
+9. **How to protect PII?** Classification → tags → tag-based masking policies → row access policies → audit via access history.
+10. **How to share data without copying?** Secure Data Sharing / listings; reader accounts for non-Snowflake consumers.
+11. **DR strategy?** Replication + failover groups to secondary region, client redirect, define RPO/RTO, test failovers.
+12. **Control costs?** Right-size, auto-suspend, resource monitors/budgets, workload separation, query optimization, monitor ACCOUNT_USAGE, storage lifecycle (transient tables, shorter Time Travel).
+13. **Dynamic Table refresh modes?** Incremental (where supported) vs full; `TARGET_LAG` or `DOWNSTREAM`.
+14. **RAG in Snowflake?** Parse docs → chunk → Cortex Search service → Agent/AI_COMPLETE with retrieved context → Streamlit UI.
+15. **Text-to-SQL for business users?** Semantic view (dimensions, metrics, relationships, verified queries) + Cortex Analyst.
+16. **Handling schema evolution?** `ENABLE_SCHEMA_EVOLUTION` on tables, VARIANT landing, `INFER_SCHEMA`, `MATCH_BY_COLUMN_NAME`.
+17. **Time Travel vs Fail-safe?** User-accessible 0–90 days vs 7-day Snowflake-only recovery.
+18. **Monitor pipelines?** Task history, `TASK_HISTORY`, alerts, event tables, DMFs, notifications to email/Slack.
+19. **What does columnar + compressed buy you?** Read only the columns a query needs; per-column encoding (dictionary, RLE, delta) cuts storage and I/O.
+20. **Why are micro-partitions immutable?** Enables Time Travel, zero-copy cloning and consistent reads; DML writes new partitions instead of editing.
+21. **Can you control micro-partition size or partition a table manually?** No – Snowflake creates them automatically; you influence layout only with a clustering key / load order.
+22. **What happens when you clone a table?** Metadata copy of the micro-partition pointer list; zero storage until either side changes, then copy-on-write.
+23. **Does a clone copy grants / Time Travel / load history?** Grants only with `COPY GRANTS` (child-object grants are kept in DB/schema clones); no source Time Travel; no load history (COPY may reload files).
+24. **Recover a table after a bad UPDATE?** `CREATE TABLE t_fix CLONE t BEFORE (STATEMENT => '<qid>')`, validate, `ALTER TABLE t SWAP WITH t_fix`.
+25. **Cloned DB has tasks – are they running?** No, cloned tasks are suspended; resume explicitly.
+26. **Does a stream store data?** No – only an offset (table version). Changes are computed from micro-partition versions + change-tracking columns when queried.
+27. **When does a stream's offset advance?** Only when a DML that reads it commits; `SELECT` alone doesn't.
+28. **What makes a stream stale?** Not consumed within retention (+ `MAX_DATA_EXTENSION_TIME_IN_DAYS`, default 14) – the old versions it needs are gone; recreate it.
+29. **How does a dynamic table refresh incrementally?** It remembers the source versions last read, uses change tracking to get only the changed rows, runs the query on them and merges into the DT; falls back to full refresh when the query isn't incrementalizable.
+30. **Stream + Task or Dynamic Table?** DT for declarative SQL transforms with target lag; Stream + Task for procedural logic, side effects, exact scheduling.
+
+---
+
+## 13. Final Checklist
+
+- [ ] Can explain Snowflake architecture in 2 minutes
+- [ ] Can explain micro-partitions (columnar, compressed, immutable, pruning) and draw clone copy-on-write
+- [ ] Can diagnose a slow query out loud using Query Profile
+- [ ] Can write MERGE / SCD2 / QUALIFY / window queries without notes
+- [ ] Can design RBAC + masking for a multi-team client
+- [ ] Can compare Streams+Tasks vs Dynamic Tables vs dbt
+- [ ] Can draw end-to-end Data + AI architecture
+- [ ] Built a small Cortex demo (AI functions + Cortex Search)
+- [ ] Have a migration methodology with validation & cutover
+- [ ] 5 quantified STAR stories ready
+- [ ] 3–4 questions prepared for the interviewer
+- [ ] (Optional) SnowPro Core / Advanced Data Engineer cert noted on resume
+
+Good luck!
+*
+���� c0006872c470107e5deb3139e2e7f43e
 ��
 :CSTM Asset schema/Review Guide - CSTM Asset Schema Catg.mdÂ# Review Guide: CSTM Asset Schema Category (Dynamic Table version)
 
@@ -676,435 +1427,6 @@ LEFT JOIN rule_pick rp
 - **Next step (done):** this SELECT has been split into the layers in §6: `inputs`/`std` became the `asset_std` CTE (over the existing asset DT), `cstm` became DT3, `rule_eval`/`rule_pick` became DT2, and the final SELECT became `WPA_CSTM_ASSET_SCHEMA_CATG`.
 *
 ���� 94284ee7d36d359ffc92c2d43eef3083
-��
-.Interview Prep/IBM_Snowflake_Interview_Prep.mdǢ# IBM – Data Engineer (Snowflake Data Platforms) – Interview Prep Guide
-
-> Role level: 10–12 yrs | Consulting / client-facing | Focus: Snowflake + Data Engineering + Cloud + Data & AI
-
----
-
-## 0. How to Use This Guide
-
-| Day | Focus | Sections |
-|-----|-------|----------|
-| 1 | Architecture, performance, cost | 1, 2 |
-| 2 | Pipelines + SQL practice | 3, 7 |
-| 3 | Security, governance, sharing | 4, 5 |
-| 4 | Cortex AI / ML (build a mini demo) | 6 |
-| 5 | Data modeling, migration, cloud, DevOps | 8, 9 |
-| 6 | Architecture whiteboard + STAR stories | 10, 11 |
-| 7 | Mock interview using Q&A bank | 12 |
-
----
-
-## 1. Snowflake Architecture
-
-**Three layers**
-1. **Storage** – columnar, compressed, immutable **micro-partitions** (50–500 MB uncompressed) on cloud object storage.
-2. **Compute** – **virtual warehouses** (independent MPP clusters). Scale up (size) for complex queries; scale out (multi-cluster) for concurrency.
-3. **Cloud Services** – auth, metadata, optimizer, transactions, security, result cache.
-
-**Why it matters:** storage & compute scale independently → workload isolation (ETL vs BI vs DS warehouses), pay-per-second, no contention.
-
-**Table types**
-| Type | Time Travel | Fail-safe | Use |
-|------|-------------|-----------|-----|
-| Permanent | 0–90 days (Enterprise) | 7 days | Prod data |
-| Transient | 0–1 day | None | Staging / reproducible data |
-| Temporary | 0–1 day | None | Session-only |
-
-**Key features to explain**
-- **Zero-copy cloning** – metadata-only copy; great for dev/test environments.
-- **Time Travel** – `AT(OFFSET => -3600)`, `BEFORE(STATEMENT => '<qid>')`, `UNDROP TABLE`.
-- **Fail-safe** – 7 days, Snowflake-support recovery only.
-
-```sql
-CREATE DATABASE dev_db CLONE prod_db;
-SELECT * FROM orders AT(OFFSET => -60*60);
-UNDROP TABLE orders;
-```
-
----
-
-## 2. Performance Tuning & Cost Optimization
-
-**Diagnose a slow query (say this sequence):**
-1. Open **Query Profile** → find most expensive operator.
-2. Check **partitions scanned vs total** → poor pruning?
-3. Check **bytes spilled** to local/remote → warehouse too small.
-4. Check **exploding joins**, missing filters, `SELECT *`.
-5. Check **queuing** → multi-cluster / separate warehouse.
-
-**Levers**
-| Problem | Fix |
-|---------|-----|
-| Poor pruning on large table | Clustering key, filter on clustered cols |
-| Point lookups / selective filters | Search Optimization Service |
-| Repeated expensive aggregations | Materialized views / Dynamic Tables |
-| Spilling | Bigger warehouse, reduce data early |
-| Concurrency queuing | Multi-cluster warehouse |
-| Unpredictable large scans | Query Acceleration Service |
-
-**Caches:** Result cache (24h, cloud services) → Local disk/warehouse cache (lost on suspend) → Metadata cache (COUNT/MIN/MAX free).
-
-**Cost control**
-- Auto-suspend 60s, auto-resume, right-size warehouses.
-- **Resource monitors** (credit quota, notify/suspend) and **Budgets**.
-- Separate warehouses per workload; tag objects/queries for chargeback.
-- Monitor via `SNOWFLAKE.ACCOUNT_USAGE`.
-
-```sql
-CREATE RESOURCE MONITOR rm_etl WITH CREDIT_QUOTA = 500
-  TRIGGERS ON 80 PERCENT DO NOTIFY ON 100 PERCENT DO SUSPEND;
-ALTER WAREHOUSE etl_wh SET RESOURCE_MONITOR = rm_etl;
-
--- Top credit consumers last 30 days
-SELECT warehouse_name, SUM(credits_used) credits
-FROM snowflake.account_usage.warehouse_metering_history
-WHERE start_time >= DATEADD(day,-30,CURRENT_TIMESTAMP())
-GROUP BY 1 ORDER BY 2 DESC;
-
--- Clustering health
-SELECT SYSTEM$CLUSTERING_INFORMATION('sales.fact_orders','(order_date)');
-```
-
----
-
-## 3. Data Pipelines
-
-### Ingestion options
-| Pattern | Tool | Latency |
-|---------|------|---------|
-| Batch files | `COPY INTO` from stage | Minutes/hours |
-| Continuous files | **Snowpipe** (auto-ingest via S3 SQS / Event Grid / Pub/Sub) | ~1 min |
-| Streaming rows | **Snowpipe Streaming**, Kafka connector | Seconds |
-| SaaS / DB CDC | **Openflow**, Fivetran, partner tools | Varies |
-
-```sql
-CREATE STORAGE INTEGRATION s3_int TYPE=EXTERNAL_STAGE STORAGE_PROVIDER='S3'
-  ENABLED=TRUE STORAGE_AWS_ROLE_ARN='arn:aws:iam::123:role/sf'
-  STORAGE_ALLOWED_LOCATIONS=('s3://my-bucket/raw/');
-
-CREATE STAGE raw_stage URL='s3://my-bucket/raw/' STORAGE_INTEGRATION=s3_int
-  FILE_FORMAT=(TYPE=JSON);
-
-CREATE PIPE raw_pipe AUTO_INGEST=TRUE AS
-  COPY INTO raw.events FROM @raw_stage;
-```
-
-### Transformation / CDC
-**Streams + Tasks** – fine-grained control, procedural logic, custom scheduling.
-```sql
-CREATE STREAM orders_strm ON TABLE raw.orders;
-
-CREATE TASK merge_orders WAREHOUSE=etl_wh SCHEDULE='5 MINUTE'
-  WHEN SYSTEM$STREAM_HAS_DATA('orders_strm') AS
-MERGE INTO silver.orders t USING orders_strm s ON t.id = s.id
-WHEN MATCHED AND s.METADATA$ACTION='DELETE' AND s.METADATA$ISUPDATE=FALSE THEN DELETE
-WHEN MATCHED AND s.METADATA$ACTION='INSERT' THEN UPDATE SET t.amount=s.amount
-WHEN NOT MATCHED AND s.METADATA$ACTION='INSERT' THEN INSERT (id,amount) VALUES (s.id,s.amount);
-
-ALTER TASK merge_orders RESUME;
-```
-
-**Dynamic Tables** – declarative; define the SELECT + `TARGET_LAG`, Snowflake handles incremental refresh & dependency DAG.
-```sql
-CREATE DYNAMIC TABLE gold.daily_sales TARGET_LAG='15 minutes' WAREHOUSE=etl_wh AS
-SELECT order_date, region, SUM(amount) revenue FROM silver.orders GROUP BY 1,2;
-```
-
-**When which?**
-- Dynamic Tables → SQL-expressible transforms, declarative pipelines, less code.
-- Streams+Tasks → procedural logic, calling procs/external functions, exact scheduling, side effects.
-- dbt → team SDLC, testing, docs, lineage (can materialize as dynamic tables; dbt Projects on Snowflake runs natively).
-
-### Semi-structured
-```sql
-SELECT v:customer.id::STRING cust_id, f.value:sku::STRING sku
-FROM raw.events, LATERAL FLATTEN(input => v:items) f;
-```
-
-### Snowpark (Python)
-- DataFrame API pushed down to Snowflake (lazy execution), UDFs/UDTFs/stored procs, vectorized UDFs, Snowpark-optimized warehouses for memory-heavy ML.
-
-### Open formats
-- **Iceberg tables** (Snowflake-managed or external catalog: Glue, Polaris/Open Catalog, Unity) – interoperability with Spark etc.
-
----
-
-## 4. Security & Governance
-
-**RBAC best practice (explain this pattern):**
-- **Access roles** (privileges on objects, e.g. `SALES_RO`, `SALES_RW`) → granted to **functional roles** (e.g. `ANALYST`, `DATA_ENGINEER`) → granted to users.
-- Roll all custom roles up to `SYSADMIN`. Use `SECURITYADMIN`/`USERADMIN` for grants/users. Minimize `ACCOUNTADMIN`.
-- Use **future grants** and **managed access schemas**; database roles for shareable privilege bundles.
-
-```sql
-CREATE ROLE sales_ro;
-GRANT USAGE ON DATABASE sales TO ROLE sales_ro;
-GRANT USAGE ON ALL SCHEMAS IN DATABASE sales TO ROLE sales_ro;
-GRANT SELECT ON FUTURE TABLES IN DATABASE sales TO ROLE sales_ro;
-GRANT ROLE sales_ro TO ROLE analyst;
-GRANT ROLE analyst TO ROLE sysadmin;
-```
-
-**Column / row protection**
-```sql
--- Dynamic masking
-CREATE MASKING POLICY pii_email AS (val STRING) RETURNS STRING ->
-  CASE WHEN IS_ROLE_IN_SESSION('PII_ADMIN') THEN val
-       ELSE REGEXP_REPLACE(val,'.+@','*****@') END;
-ALTER TABLE customers MODIFY COLUMN email SET MASKING POLICY pii_email;
-
--- Row access
-CREATE ROW ACCESS POLICY region_rap AS (region STRING) RETURNS BOOLEAN ->
-  EXISTS (SELECT 1 FROM sec.region_map m
-          WHERE m.role = CURRENT_ROLE() AND m.region = region);
-ALTER TABLE sales ADD ROW ACCESS POLICY region_rap ON (region);
-```
-- **Tag-based masking**: attach masking policy to a tag (e.g. `PII=EMAIL`) → auto-protect every tagged column.
-- **Auto classification** to detect sensitive data.
-- **Auditing**: `ACCESS_HISTORY`, `LOGIN_HISTORY`, lineage in Horizon.
-- **Data quality**: Data Metric Functions (NULL_COUNT, FRESHNESS, custom DMFs).
-
-**Network & auth**
-- Network policies / rules, PrivateLink, SSO (SAML/OAuth), key-pair auth for service users, MFA.
-- Encryption at rest/in transit by default; **Tri-Secret Secure** (customer-managed key); periodic rekeying.
-
----
-
-## 5. Data Sharing, Replication & DR
-
-- **Secure Data Sharing**: provider grants objects to a **share**; consumer creates DB from share – **no data copy**, live data, consumer pays compute.
-- **Reader accounts** for consumers without Snowflake.
-- **Listings** (private / Marketplace), cross-region via auto-fulfillment.
-- Use **secure views** to share filtered data.
-- **Replication & failover groups** – replicate DBs, roles, warehouses, integrations to another region/cloud; `ALTER FAILOVER GROUP ... PRIMARY` for DR. **Client redirect** via connection URLs.
-- **Data Clean Rooms** – privacy-preserving joins between parties.
-
-```sql
-CREATE SHARE sales_share;
-GRANT USAGE ON DATABASE sales TO SHARE sales_share;
-GRANT USAGE ON SCHEMA sales.public TO SHARE sales_share;
-GRANT SELECT ON VIEW sales.public.v_partner_sales TO SHARE sales_share;
-ALTER SHARE sales_share ADD ACCOUNTS = partnerorg.partneracct;
-```
-
----
-
-## 6. Data & AI on Snowflake (heavily emphasized in the JD)
-
-| Capability | What it does | Example use case |
-|-----------|--------------|------------------|
-| **Cortex AI functions** (`AI_COMPLETE`, `AI_CLASSIFY`, `AI_EXTRACT`, `AI_SENTIMENT`, `AI_SUMMARIZE_AGG`, `AI_FILTER`, `AI_TRANSLATE`) | LLMs in SQL | Ticket triage, review sentiment |
-| **AI_PARSE_DOCUMENT** | OCR / layout from PDFs | Invoice & contract processing |
-| **Cortex Search** | Hybrid vector + keyword search service | RAG chatbot over docs |
-| **Cortex Analyst + Semantic Views** | Natural language → SQL | Self-service BI for business users |
-| **Cortex Agents / Snowflake Intelligence** | Orchestrate Analyst + Search + tools | Enterprise assistant |
-| **Snowflake ML** (Feature Store, Model Registry, ML Jobs, Observability) | End-to-end ML | Churn / demand forecasting |
-| **SPCS** (Container Services) | Run containers/GPUs | Custom models, apps |
-| **Streamlit in Snowflake** | Apps on data | UI for AI use cases |
-
-```sql
-SELECT ticket_id,
-       AI_CLASSIFY(body, ['billing','technical','account']):labels[0]::STRING AS category,
-       AI_SENTIMENT(body) AS sentiment
-FROM support.tickets;
-
-SELECT AI_COMPLETE('claude-3-5-sonnet',
-  'Summarize this complaint in 1 line: ' || body) FROM support.tickets LIMIT 5;
-```
-
-**Reference RAG architecture (be able to draw):**
-`Stage (PDFs)` → `AI_PARSE_DOCUMENT` → chunk (`SPLIT_TEXT_RECURSIVE_CHARACTER`) → chunk table → `CREATE CORTEX SEARCH SERVICE` → Cortex Agent (+ Analyst over semantic view for structured data) → Streamlit / Snowflake Intelligence UI. Governance: RBAC on search service, masking on source tables, AI cost monitoring.
-
-> Tip: Build this mini demo in your trial account before the interview – speaking from hands-on experience is a big differentiator.
-
----
-
-## 7. SQL Practice (expect live coding)
-
-```sql
--- 1. Dedup: latest record per key
-SELECT * FROM customers
-QUALIFY ROW_NUMBER() OVER (PARTITION BY cust_id ORDER BY updated_at DESC) = 1;
-
--- 2. Running total & 7-day moving average
-SELECT order_date, revenue,
-  SUM(revenue) OVER (ORDER BY order_date) running_total,
-  AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) ma7
-FROM daily_sales;
-
--- 3. Nth highest salary per department
-SELECT * FROM emp
-QUALIFY DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary DESC) = 2;
-
--- 4. Gaps & islands: consecutive login days
-WITH d AS (
-  SELECT user_id, login_date,
-         DATEADD(day, -ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY login_date), login_date) grp
-  FROM (SELECT DISTINCT user_id, login_date FROM logins))
-SELECT user_id, MIN(login_date) start_dt, MAX(login_date) end_dt, COUNT(*) streak
-FROM d GROUP BY user_id, grp;
-
--- 5. Month-over-month growth
-SELECT month, revenue,
-  (revenue - LAG(revenue) OVER (ORDER BY month)) / NULLIF(LAG(revenue) OVER (ORDER BY month),0) mom_pct
-FROM monthly_sales;
-
--- 6. Recursive CTE: org hierarchy
-WITH RECURSIVE org AS (
-  SELECT emp_id, mgr_id, name, 1 lvl FROM emp WHERE mgr_id IS NULL
-  UNION ALL
-  SELECT e.emp_id, e.mgr_id, e.name, o.lvl+1 FROM emp e JOIN org o ON e.mgr_id = o.emp_id)
-SELECT * FROM org;
-
--- 7. SCD Type 2 with MERGE (two-step: expire changed, insert new versions)
-MERGE INTO dim_customer d
-USING (
-  SELECT s.cust_id AS merge_key, s.* FROM stg_customer s
-  UNION ALL
-  SELECT NULL, s.* FROM stg_customer s
-  JOIN dim_customer d ON s.cust_id = d.cust_id AND d.is_current
-  WHERE s.hash_diff <> d.hash_diff
-) src
-ON d.cust_id = src.merge_key AND d.is_current
-WHEN MATCHED AND d.hash_diff <> src.hash_diff THEN
-  UPDATE SET d.is_current = FALSE, d.end_date = CURRENT_TIMESTAMP()
-WHEN NOT MATCHED THEN
-  INSERT (cust_id, name, city, hash_diff, start_date, end_date, is_current)
-  VALUES (src.cust_id, src.name, src.city, src.hash_diff, CURRENT_TIMESTAMP(), NULL, TRUE);
-
--- 8. Pivot
-SELECT * FROM (SELECT region, quarter, revenue FROM sales)
-PIVOT (SUM(revenue) FOR quarter IN ('Q1','Q2','Q3','Q4'));
-```
-
----
-
-## 8. Data Modeling & Warehousing
-
-- **Kimball**: facts (transactional, periodic snapshot, accumulating snapshot) + conformed dimensions; star preferred over snowflake schema in Snowflake (fewer joins, storage cheap).
-- **SCD types**: 0 (fixed), 1 (overwrite), 2 (history rows), 3 (prev column), 6 (hybrid).
-- **Data Vault 2.0**: Hubs (business keys), Links (relationships), Satellites (history) – good for auditable, many-source enterprise integration; insert-only, parallel loads.
-- **Medallion**: Bronze (raw, VARIANT) → Silver (cleansed, conformed) → Gold (business marts / semantic layer).
-- **ELT over ETL** in Snowflake – land raw, transform with in-database compute.
-- Principles: idempotent loads, handle late-arriving data, surrogate keys/hash keys, audit columns, data quality checks, data contracts.
-
----
-
-## 9. Cloud, Migration & DevOps
-
-**Migration approach (e.g. Teradata / Oracle / Netezza / Hadoop → Snowflake):**
-1. **Assess** – inventory objects, workloads, dependencies, usage; prioritize by value/complexity.
-2. **Plan** – target architecture, RBAC, environments, wave plan.
-3. **Convert code** – SnowConvert / AI-assisted conversion; refactor procedural code (BTEQ, PL/SQL) to Snowflake SQL / Snowpark / dbt.
-4. **Migrate data** – historical bulk load (export to cloud storage → `COPY INTO`), then incremental CDC to sync.
-5. **Validate** – row counts, checksums/aggregates, sample record compare, report reconciliation.
-6. **Parallel run & cutover** – repoint BI/ETL, decommission legacy.
-7. **Optimize** – right-size warehouses, clustering, cost governance.
-
-**Minimal downtime:** bulk historical + CDC catch-up + parallel run + short freeze window for final delta.
-
-**Cloud essentials (pick your strongest – AWS/Azure/GCP):**
-- Object storage (S3/ADLS/GCS), IAM roles & trust policies for storage integrations, KMS, VPC/PrivateLink, event notifications for Snowpipe, orchestration (Airflow, ADF, Step Functions).
-
-**DevOps / IaC:**
-- Git integration, CI/CD (GitHub Actions / Azure DevOps / Jenkins), Terraform Snowflake provider, schemachange / DCM projects, dbt.
-- Env strategy: DEV / QA / PROD via clones; promote via pipelines; automated tests.
-
----
-
-## 10. Architecture Whiteboard (practice drawing this)
-
-```
- Sources (ERP, CRM, DBs, APIs, Files, Streams)
-        │  Openflow / Fivetran / Kafka / Snowpipe(Streaming)
-        ▼
- ┌──────────── SNOWFLAKE ─────────────────────────────────┐
- │ BRONZE (raw, VARIANT)                                  │
- │   │ Streams+Tasks / Dynamic Tables / dbt               │
- │ SILVER (cleansed, conformed, SCD2)                     │
- │   │                                                    │
- │ GOLD (star schemas, marts) → Semantic Views            │
- │                                                        │
- │ AI: Cortex AI funcs, Cortex Search, Analyst, Agents,   │
- │     Snowflake ML, SPCS                                 │
- │ Governance: RBAC, masking/RAP, tags, DMFs, lineage     │
- │ Ops: Resource monitors, budgets, replication/failover  │
- └────────────────────────────────────────────────────────┘
-        ▼
- Consumers: BI (Power BI/Tableau), Streamlit apps,
- Snowflake Intelligence, Data Sharing / Marketplace
-```
-Talk through: **scalability** (warehouse isolation, multi-cluster), **security** (network, RBAC, masking), **cost** (auto-suspend, monitors), **reliability** (DR replication, monitoring, alerts), **CI/CD**.
-
----
-
-## 11. Behavioral / Consulting (STAR stories)
-
-Prepare 5 stories with **numbers**:
-| Theme | Prompt |
-|-------|--------|
-| Migration | "Tell me about a large migration you led." |
-| Performance/Cost | "Describe a time you significantly reduced cost or runtime." |
-| Stakeholder | "Time you disagreed with a client on design." |
-| Leadership | "How do you mentor / lead a distributed team?" |
-| Incident | "A production failure and how you handled it." |
-| AI | "An AI/GenAI use case you delivered or would propose." |
-
-**STAR template:** Situation (1 line) → Task (your responsibility) → Action (what *you* did, technical detail) → Result (quantified: %, $, hours, SLA).
-
-**IBM-specific:** IBM Consulting values client focus, delivery excellence, growth mindset, and partner ecosystems (IBM is a Snowflake partner; know watsonx at a high level and how it can complement Snowflake).
-
-**Questions to ask them:**
-- What client industries / use cases will this role support first?
-- Is the work greenfield, migration, or modernization-heavy?
-- How is the Snowflake practice structured (team size, onshore/offshore)?
-- What does success look like in the first 6 months?
-
----
-
-## 12. Q&A Bank – Short Model Answers
-
-1. **Why Snowflake over a traditional DW?** Separation of storage/compute, elasticity, near-zero maintenance, native semi-structured support, secure sharing, multi-cloud, built-in AI.
-2. **Scale up vs scale out?** Up = bigger size for complex/large queries; out = multi-cluster for concurrency.
-3. **What is a micro-partition / pruning?** Immutable columnar units with min/max metadata; optimizer skips partitions not matching filters.
-4. **When to add a clustering key?** Multi-TB tables, frequent filters on a column, poor pruning, and query patterns justify reclustering cost.
-5. **Stream types?** Standard (insert/update/delete), append-only, insert-only (external/Iceberg). Stream offset advances only when consumed in a DML transaction.
-6. **Snowpipe vs COPY?** Snowpipe is serverless, event-driven, continuous; COPY is batch using your warehouse.
-7. **How to load idempotently?** COPY load metadata (64 days) prevents reload; MERGE on keys; hash diffs.
-8. **Secure view vs normal view?** Secure hides definition and prevents optimizer leaks; required for sharing; may be slightly slower.
-9. **How to protect PII?** Classification → tags → tag-based masking policies → row access policies → audit via access history.
-10. **How to share data without copying?** Secure Data Sharing / listings; reader accounts for non-Snowflake consumers.
-11. **DR strategy?** Replication + failover groups to secondary region, client redirect, define RPO/RTO, test failovers.
-12. **Control costs?** Right-size, auto-suspend, resource monitors/budgets, workload separation, query optimization, monitor ACCOUNT_USAGE, storage lifecycle (transient tables, shorter Time Travel).
-13. **Dynamic Table refresh modes?** Incremental (where supported) vs full; `TARGET_LAG` or `DOWNSTREAM`.
-14. **RAG in Snowflake?** Parse docs → chunk → Cortex Search service → Agent/AI_COMPLETE with retrieved context → Streamlit UI.
-15. **Text-to-SQL for business users?** Semantic view (dimensions, metrics, relationships, verified queries) + Cortex Analyst.
-16. **Handling schema evolution?** `ENABLE_SCHEMA_EVOLUTION` on tables, VARIANT landing, `INFER_SCHEMA`, `MATCH_BY_COLUMN_NAME`.
-17. **Time Travel vs Fail-safe?** User-accessible 0–90 days vs 7-day Snowflake-only recovery.
-18. **Monitor pipelines?** Task history, `TASK_HISTORY`, alerts, event tables, DMFs, notifications to email/Slack.
-
----
-
-## 13. Final Checklist
-
-- [ ] Can explain Snowflake architecture in 2 minutes
-- [ ] Can diagnose a slow query out loud using Query Profile
-- [ ] Can write MERGE / SCD2 / QUALIFY / window queries without notes
-- [ ] Can design RBAC + masking for a multi-team client
-- [ ] Can compare Streams+Tasks vs Dynamic Tables vs dbt
-- [ ] Can draw end-to-end Data + AI architecture
-- [ ] Built a small Cortex demo (AI functions + Cortex Search)
-- [ ] Have a migration methodology with validation & cutover
-- [ ] 5 quantified STAR stories ready
-- [ ] 3–4 questions prepared for the interviewer
-- [ ] (Optional) SnowPro Core / Advanced Data Engineer cert noted on resume
-
-Good luck!
-*
-���� 5139812ab6c8fca607d85d0fd9dabb2a
 ��
 $Interview Prep/DBT_Interview_Prep.mdܜ# dbt Interview Prep (Snowflake-focused)
 
@@ -2821,6 +3143,1249 @@ EUROPE,Lukas Weber
 MIDDLE EAST,Omar Haddad
 *
 ���� a0c33d7806ae7587ed770410a088d93f
+�y
+Interview Prep/SQl Prep 2.sql�y-- SQL INTERVIEW PRACTICE: SNOWFLAKE
+-- Run this script from top to bottom in a Snowflake worksheet.
+-- Select a database and schema before running it.
+-- All tables are TRANSIENT and will be removed when your session ends.
+
+-- ============================================================
+-- PART 1: DDL — CREATE SAMPLE TABLES
+-- ============================================================
+
+CREATE TRANSIENT TABLE departments (
+    department_id   NUMBER,
+    department_name VARCHAR
+);
+
+CREATE TRANSIENT TABLE employees (
+    employee_id   NUMBER,
+    employee_name VARCHAR,
+    department_id NUMBER,
+    manager_id    NUMBER,
+    salary        NUMBER(10, 2),
+    hire_date     DATE
+);
+
+CREATE TRANSIENT TABLE customers_Bkp (
+    customer_id   NUMBER,
+    customer_name VARCHAR
+);
+
+CREATE TRANSIENT TABLE orders_Bkp (
+    order_id    NUMBER,
+    customer_id NUMBER,
+    order_date  DATE,
+    amount      NUMBER(10, 2),
+    status      VARCHAR
+);
+
+CREATE TRANSIENT TABLE signups (
+    signup_id NUMBER,
+    email     VARCHAR,
+    created_at TIMESTAMP_NTZ
+);
+
+-- ============================================================
+-- PART 2: DML — INSERT SAMPLE DATA
+-- ============================================================
+
+INSERT INTO departments (department_id, department_name) VALUES
+    (10, 'Engineering'),
+    (20, 'Sales'),
+    (30, 'Marketing'),
+    (40, 'Research');
+
+INSERT INTO employees
+    (employee_id, employee_name, department_id, manager_id, salary, hire_date)
+VALUES
+    (101, 'Alice', 10, NULL, 120000.00, '2018-03-15'),
+    (102, 'Bob',   10, 101,  90000.00, '2020-06-01'),
+    (103, 'Cara',  10, 101,  90000.00, '2021-01-20'),
+    (104, 'Dan',   10, 102,  70000.00, '2022-09-10'),
+    (201, 'Eva',   20, NULL, 110000.00, '2017-11-05'),
+    (202, 'Finn',  20, 201,  80000.00, '2020-02-14'),
+    (203, 'Gia',   20, 201,  75000.00, '2023-04-03'),
+    (301, 'Hugo',  30, NULL,  95000.00, '2019-08-22'),
+    (302, 'Ivy',   30, 301,  65000.00, '2022-12-01');
+
+INSERT INTO customers_Bkp (customer_id, customer_name) VALUES
+    (1, 'Acme Corp'),
+    (2, 'Blue Sky Ltd'),
+    (3, 'Cedar Works'),
+    (4, 'Delta Services'),
+    (5, 'Evergreen Inc'),
+    (6, 'Foxglove Group');
+
+INSERT INTO orders_Bkp (order_id, customer_id, order_date, amount, status) VALUES
+    (1001, 1, '2025-01-10', 100.00, 'completed'),
+    (1002, 1, '2025-01-20', 150.00, 'completed'),
+    (1003, 1, '2025-02-05', 200.00, 'completed'),
+    (1004, 2, '2025-01-12',  80.00, 'completed'),
+    (1005, 2, '2025-02-14', 120.00, 'pending'),
+    (1006, 3, '2025-02-15', 300.00, 'completed'),
+    (1007, 3, '2025-03-01',  50.00, 'cancelled'),
+    (1008, 4, '2025-03-03', 400.00, 'completed'),
+    (1009, 6, '2025-03-10', 250.00, 'pending');
+
+INSERT INTO signups (signup_id, email, created_at) VALUES
+    (1, 'alex@example.com', '2025-01-01 09:00:00'),
+    (2, 'blair@example.com', '2025-01-03 10:30:00'),
+    (3, 'alex@example.com', '2025-02-10 14:15:00'),
+    (4, 'casey@example.com', '2025-02-12 08:45:00'),
+    (5, 'blair@example.com', '2025-03-01 12:00:00');
+
+-- ============================================================
+-- PART 3: INTERVIEW SCENARIOS
+-- Each section includes a question, runnable answer, and explanation.
+-- ============================================================
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 1: Employees earning above their department average
+-- ------------------------------------------------------------
+-- Question:
+-- Find employees whose salary is greater than the average salary
+-- in their own department.
+
+ SELECT DEPARTMENT_ID,AVG(salary)
+FROM employees
+GROUP BY DEPARTMENT_ID;
+
+ SELECT *
+FROM employees;
+
+SELECT
+    e.employee_id,
+    e.employee_name,
+    e.department_id,
+    e.salary
+FROM employees AS e
+WHERE e.salary > (
+    SELECT AVG(e2.salary)
+    FROM employees AS e2
+    WHERE e2.department_id = e.department_id
+)
+ORDER BY e.department_id, e.salary DESC;
+
+-- Explanation:
+-- The subquery calculates an average for the department of each outer
+-- employee row. It is a correlated subquery because it refers to e.department_id.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 2: Top 3 salary ranks in each department, including ties
+-- ------------------------------------------------------------
+-- Question:
+-- Return employees whose salary rank is in the top three for their department.
+-- Employees tied on salary share a rank.
+
+WITH ranked_employees AS (
+    SELECT
+        employee_id,
+        employee_name,
+        department_id,
+        salary,
+        DENSE_RANK() OVER (
+            PARTITION BY department_id
+            ORDER BY salary DESC
+        ) AS salary_rank
+    FROM employees
+)
+SELECT
+    employee_id,
+    employee_name,
+    department_id,
+    salary,
+    salary_rank
+FROM ranked_employees
+WHERE salary_rank <= 3
+ORDER BY department_id, salary DESC, employee_id;
+
+-- Explanation:
+-- DENSE_RANK gives equal salaries the same rank and does not leave gaps.
+-- This can return more than three employees in a department if salaries tie.
+-- Use ROW_NUMBER instead if the requirement is exactly three rows per department.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 3: customers_Bkp who have never placed an order
+-- ------------------------------------------------------------
+-- Question:
+-- Find customers_Bkp with no matching row in the orders_Bkp table.
+
+SELECT
+    c.customer_id,
+    c.customer_name
+FROM customers_Bkp AS c
+LEFT JOIN orders_Bkp AS o
+    ON o.customer_id = c.customer_id
+WHERE o.order_id IS NULL
+ORDER BY c.customer_id;
+
+-- Explanation:
+-- LEFT JOIN retains every customer. For customers_Bkp without an order,
+-- o.order_id is NULL, so the WHERE clause keeps only those customers_Bkp.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 4: Monthly revenue from completed orders_Bkp
+-- ------------------------------------------------------------
+-- Question:
+-- Calculate completed-order revenue by month.
+
+SELECT
+    DATE_TRUNC('MONTH', order_date)::DATE AS order_month,
+    SUM(amount) AS monthly_revenue
+FROM orders_Bkp
+WHERE status = 'completed'
+GROUP BY DATE_TRUNC('MONTH', order_date)::DATE
+ORDER BY order_month;
+
+-- Explanation:
+-- DATE_TRUNC groups dates into calendar months, and SUM adds completed
+-- order amounts within each month.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 5: Second-highest distinct salary
+-- ------------------------------------------------------------
+-- Question:
+-- Find the second-highest distinct salary in the company.
+
+WITH ranked_salaries AS (
+    SELECT
+        salary,
+        DENSE_RANK() OVER (ORDER BY salary DESC) AS salary_rank
+    FROM employees
+)
+SELECT DISTINCT salary
+FROM ranked_salaries
+WHERE salary_rank = 2;
+
+-- Explanation:
+-- DENSE_RANK ranks distinct salary values. If multiple employees earn
+-- the second-highest salary, the query returns that salary once.
+-- To return employee details too, rank employees and filter on salary_rank = 2.
+
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 6: Running completed-order total for each customer
+-- ------------------------------------------------------------
+-- Question:
+-- Show each completed order and the customer's cumulative total up to it.
+
+SELECT
+    customer_id,
+    order_id,
+    order_date,
+    amount,
+    SUM(amount) OVER (
+        PARTITION BY customer_id
+        ORDER BY order_date, order_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total
+FROM orders_Bkp
+WHERE status = 'completed'
+ORDER BY customer_id, order_date, order_id;
+
+-- Explanation:
+-- The window function accumulates amounts for each customer.
+-- order_id makes the ordering deterministic when two orders_Bkp share a date.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 7: Keep only the most recent signup for each email
+-- ------------------------------------------------------------
+-- Question:
+-- Return the newest signup record for each email address.
+
+WITH ranked_signups AS (
+    SELECT
+        signup_id,
+        email,
+        created_at,
+        ROW_NUMBER() OVER (
+            PARTITION BY email
+            ORDER BY created_at DESC, signup_id DESC
+        ) AS row_num
+    FROM signups
+)
+SELECT
+    signup_id,
+    email,
+    created_at
+FROM ranked_signups
+WHERE row_num = 1
+ORDER BY email;
+
+-- Explanation:
+-- ROW_NUMBER numbers each email's rows from newest to oldest.
+-- The extra signup_id sort is a tie-breaker if timestamps match.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 8: Employee count by department, including empty departments
+-- ------------------------------------------------------------
+-- Question:
+-- Show every department and its employee count, including departments
+-- that have no employees.
+
+SELECT * FROM departments;
+
+SELECT
+    d.department_id,
+    d.department_name,
+    COUNT(e.employee_id) AS employee_count
+FROM departments AS d
+LEFT JOIN employees AS e
+    ON e.department_id = d.department_id
+GROUP BY d.department_id, d.department_name
+ORDER BY d.department_id;
+
+-- Explanation:
+-- LEFT JOIN keeps departments with no employees. COUNT(employee_id) returns
+-- zero for those departments; COUNT(*) would count the department row itself.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 9: Completed-order revenue per customer, including zero revenue
+-- ------------------------------------------------------------
+-- Question:
+-- Show every customer and their completed-order total. customers_Bkp with no
+-- completed orders_Bkp should show zero.
+
+SELECT
+    c.customer_id,
+    c.customer_name,
+    COALESCE(SUM(IFF(o.status = 'completed', o.amount, 0)), 0)
+        AS completed_revenue
+FROM customers_Bkp AS c
+LEFT JOIN orders_Bkp AS o
+    ON o.customer_id = c.customer_id
+GROUP BY c.customer_id, c.customer_name
+ORDER BY completed_revenue DESC, c.customer_id;
+
+-- Explanation:
+-- COALESCE turns a NULL total into zero. The conditional IFF counts only
+-- completed orders_Bkp. Keeping the status condition out of WHERE preserves
+-- customers_Bkp who have no completed orders_Bkp.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 10: Rank orders_Bkp by amount within each customer
+-- ------------------------------------------------------------
+-- Question:
+-- Rank each customer's orders_Bkp from largest to smallest.
+
+SELECT
+    customer_id,
+    order_id,
+    amount,
+    status,
+    RANK() OVER (
+        PARTITION BY customer_id
+        ORDER BY amount DESC
+    ) AS amount_rank
+FROM orders_Bkp
+ORDER BY customer_id, amount_rank, order_id;
+
+-- Explanation:
+-- RANK assigns equal amounts the same rank and leaves gaps after ties.
+-- Use DENSE_RANK if you do not want gaps, or ROW_NUMBER for unique row numbers.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 11: Each employee's share of department payroll
+-- ------------------------------------------------------------
+-- Question:
+-- Calculate each employee's percentage of their department's total salary.
+
+SELECT
+    employee_id,
+    employee_name,
+    department_id,
+    salary,
+    ROUND(
+        100.0 * salary
+        / NULLIF(SUM(salary) OVER (PARTITION BY department_id), 0),
+        2
+    ) AS department_payroll_percentage
+FROM employees
+ORDER BY department_id, salary DESC;
+
+-- Explanation:
+-- The window SUM calculates total salary per department without collapsing
+-- employee rows. NULLIF protects against division by zero.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 12: Find duplicate email addresses
+-- ------------------------------------------------------------
+-- Question:
+-- Find email addresses that appear more than once and show their counts.
+
+SELECT
+    email,
+    COUNT(*) AS signup_count
+FROM signups
+GROUP BY email
+HAVING COUNT(*) > 1
+ORDER BY signup_count DESC, email;
+
+-- Explanation:
+-- GROUP BY forms one group per email. HAVING filters the grouped results,
+-- much like WHERE filters individual rows.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 13: Show each employee and their manager
+-- ------------------------------------------------------------
+-- Question:
+-- Return each employee's name alongside their manager's name.
+
+SELECT
+    e.employee_id,
+    e.employee_name,
+    m.employee_name AS manager_name
+FROM employees AS e
+LEFT JOIN employees AS m
+    ON e.manager_id = m.employee_id
+ORDER BY e.employee_id;
+
+-- Explanation:
+-- This is a self-join: employees is used once for the employee and again
+-- for the manager. LEFT JOIN retains top-level employees with no manager.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 14: orders_Bkp larger than the overall average order amount
+-- ------------------------------------------------------------
+-- Question:
+-- Find orders_Bkp whose amount is greater than the average amount of all orders_Bkp.
+
+SELECT
+    order_id,
+    customer_id,
+    order_date,
+    amount,
+    status
+FROM orders_Bkp
+WHERE amount > (
+    SELECT AVG(amount)
+    FROM orders_Bkp
+)
+ORDER BY amount DESC;
+
+-- Explanation:
+-- The scalar subquery returns one overall average value. The outer query
+-- compares every order amount against that value.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 15: Month-over-month completed revenue change
+-- ------------------------------------------------------------
+-- Question:
+-- Show monthly completed revenue and the difference from the previous
+-- month with completed revenue.
+
+WITH monthly_revenue AS (
+    SELECT
+        DATE_TRUNC('MONTH', order_date)::DATE AS order_month,
+        SUM(amount) AS revenue
+    FROM orders_Bkp
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)::DATE
+),
+revenue_with_previous_month AS (
+    SELECT
+        order_month,
+        revenue,
+        LAG(revenue) OVER (ORDER BY order_month) AS previous_month_revenue
+    FROM monthly_revenue
+)
+SELECT
+    order_month,
+    revenue,
+    previous_month_revenue,
+    revenue - previous_month_revenue AS revenue_change
+FROM revenue_with_previous_month
+ORDER BY order_month;
+
+-- Explanation:
+-- LAG reads the revenue value from the previous row in month order.
+-- The first month has no previous month, so its previous value and change
+-- are NULL. Months with no completed orders_Bkp are not generated by this query.
+
+
+-- ------------------------------------------------------------
+-- SCENARIO 16: Cumulative completed revenue by month
+-- ------------------------------------------------------------
+-- Question:
+-- Calculate monthly completed revenue and the cumulative revenue total.
+
+WITH monthly_revenue AS (
+    SELECT
+        DATE_TRUNC('MONTH', order_date)::DATE AS order_month,
+        SUM(amount) AS revenue
+    FROM orders_Bkp
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)::DATE
+)
+SELECT
+    order_month,
+    revenue,
+    SUM(revenue) OVER (
+        ORDER BY order_month
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_revenue
+FROM monthly_revenue
+ORDER BY order_month;
+
+-- Explanation:
+-- The windowed SUM adds each month's revenue to all prior months'
+-- revenue, while retaining one output row per month.
+
+-- ============================================================
+-- END OF SCRIPT
+-- ============================================================*
+���� 8778d9b3c18d11820fa39299b680954b
+�.
+Interview Prep/PROD SETUP.sql�--- =====================================================================
+-- PROD SETUP for retail_project  (GitHub Actions -> PROD account)
+--
+--   DEV  account : XCULCMB-SO42451  (this one)  -> CI builds on pull requests
+--   PROD account : EIESWGF-ZX43054  (new trial) -> deploy on merge to main
+--
+-- Replace before running:
+--   Repo: https://github.com/thazhaiselvan-git/dbt_deployment_demo
+--   <GITHUB_USERNAME>    thazhaiselvan-git (or your GitHub login)
+--   <GITHUB_PAT>         GitHub personal access token (Contents: Read)  -- never commit this
+--   <DEV_PUBLIC_KEY>     contents of dev_key.pub  (without BEGIN/END lines)
+--   <PROD_PUBLIC_KEY>    contents of prod_key.pub (without BEGIN/END lines)
+-- =====================================================================
+
+
+-- #####################################################################
+-- PART A: run in the DEV account (XCULCMB-SO42451) as ACCOUNTADMIN
+-- Service user that GitHub CI uses to build PR changes in RETAIL_DBT.CI_PR_<n>
+-- #####################################################################
+USE ROLE ACCOUNTADMIN;
+
+CREATE USER IF NOT EXISTS SVC_GITHUB_CI
+  TYPE = SERVICE
+  DEFAULT_ROLE = DBT_ROLE
+  DEFAULT_WAREHOUSE = DBT_WH
+  RSA_PUBLIC_KEY = '<DEV_PUBLIC_KEY>'
+  COMMENT = 'GitHub Actions CI for retail_project';
+
+GRANT ROLE DBT_ROLE TO USER SVC_GITHUB_CI;
+
+
+-- #####################################################################
+-- PART B: run in the PROD account (EIESWGF-ZX43054) as ACCOUNTADMIN
+-- #####################################################################
+USE ROLE ACCOUNTADMIN;
+
+-- ---------- 1. Role and warehouse (same names as DEV so the profile needs no changes) ----------
+CREATE ROLE IF NOT EXISTS DBT_ROLE COMMENT = 'Runs retail_project in PROD';
+GRANT ROLE DBT_ROLE TO ROLE SYSADMIN;
+
+CREATE WAREHOUSE IF NOT EXISTS DBT_WH
+  WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE;
+GRANT USAGE, OPERATE ON WAREHOUSE DBT_WH TO ROLE DBT_ROLE;
+
+-- ---------- 2. Database and schemas ----------
+CREATE DATABASE IF NOT EXISTS RETAIL_DBT;
+CREATE SCHEMA IF NOT EXISTS RETAIL_DBT.RAW;
+CREATE SCHEMA IF NOT EXISTS RETAIL_DBT.PROD;
+
+GRANT USAGE ON DATABASE RETAIL_DBT TO ROLE DBT_ROLE;
+GRANT USAGE ON SCHEMA RETAIL_DBT.RAW TO ROLE DBT_ROLE;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA RETAIL_DBT.RAW TO ROLE DBT_ROLE;
+GRANT ALL ON SCHEMA RETAIL_DBT.PROD TO ROLE DBT_ROLE;
+
+-- ---------- 3. RAW data (in real life this comes from your ingestion pipeline) ----------
+CREATE OR REPLACE TABLE RETAIL_DBT.RAW.NATIONS AS SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.NATION;
+CREATE OR REPLACE TABLE RETAIL_DBT.RAW.REGIONS AS SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.REGION;
+CREATE OR REPLACE TABLE RETAIL_DBT.RAW.CUSTOMERS AS
+  SELECT c.*, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS updated_at FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER c;
+CREATE OR REPLACE TABLE RETAIL_DBT.RAW.ORDERS AS
+  SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS WHERE o_orderkey <= 400000;
+CREATE OR REPLACE TABLE RETAIL_DBT.RAW.LINEITEMS AS
+  SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.LINEITEM WHERE l_orderkey <= 400000;
+GRANT SELECT ON ALL TABLES IN SCHEMA RETAIL_DBT.RAW TO ROLE DBT_ROLE;
+
+-- ---------- 4. GitHub connection (integrations/secrets are per account, so recreate here) ----------
+CREATE OR REPLACE SECRET RETAIL_DBT.PROD.GITHUB_PAT
+  TYPE = PASSWORD
+  USERNAME = '<GITHUB_USERNAME>'
+  PASSWORD = '<GITHUB_PAT>';
+
+CREATE OR REPLACE API INTEGRATION GITHUB_API_INTEGRATION
+  API_PROVIDER = GIT_HTTPS_API
+  API_ALLOWED_PREFIXES = ('https://github.com/thazhaiselvan-git')
+  ALLOWED_AUTHENTICATION_SECRETS = (RETAIL_DBT.PROD.GITHUB_PAT)
+  ENABLED = TRUE;
+
+GRANT USAGE ON INTEGRATION GITHUB_API_INTEGRATION TO ROLE DBT_ROLE;
+GRANT READ, USAGE ON SECRET RETAIL_DBT.PROD.GITHUB_PAT TO ROLE DBT_ROLE;
+GRANT EXECUTE TASK ON ACCOUNT TO ROLE DBT_ROLE;
+
+-- ---------- 5. Deploy service user for GitHub Actions ----------
+CREATE USER IF NOT EXISTS SVC_GITHUB_DEPLOY
+  TYPE = SERVICE
+  DEFAULT_ROLE = DBT_ROLE
+  DEFAULT_WAREHOUSE = DBT_WH
+  RSA_PUBLIC_KEY = '<PROD_PUBLIC_KEY>'
+  COMMENT = 'GitHub Actions deploy for retail_project';
+GRANT ROLE DBT_ROLE TO USER SVC_GITHUB_DEPLOY;
+
+-- Let yourself use DBT_ROLE in the PROD account too
+GRANT ROLE DBT_ROLE TO USER <YOUR_PROD_LOGIN>;   -- your login name in the PROD account
+
+-- ---------- 6. Objects owned by DBT_ROLE: Git repo, dbt project, schedule ----------
+USE ROLE DBT_ROLE;
+USE WAREHOUSE DBT_WH;
+
+CREATE OR REPLACE GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO
+  API_INTEGRATION = GITHUB_API_INTEGRATION
+  GIT_CREDENTIALS = RETAIL_DBT.PROD.GITHUB_PAT
+  ORIGIN = 'https://github.com/thazhaiselvan-git/dbt_deployment_demo.git';
+
+ALTER GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO FETCH;
+LS @RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project;   -- should list dbt_project.yml
+
+-- First deploy (later deploys come from GitHub Actions via ALTER ... DEPLOY FROM)
+CREATE DBT PROJECT IF NOT EXISTS RETAIL_DBT.PROD.RETAIL_PROJECT
+  FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project'
+  DEFAULT_TARGET = 'prod';
+
+EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
+
+-- Daily scheduled run (resume when ready)
+CREATE OR ALTER TASK RETAIL_DBT.PROD.RUN_RETAIL_DBT_DAILY
+  WAREHOUSE = DBT_WH
+  SCHEDULE = 'USING CRON 0 6 * * * Asia/Tokyo'
+AS
+  EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
+-- ALTER TASK RETAIL_DBT.PROD.RUN_RETAIL_DBT_DAILY RESUME;
+
+-- ---------- 7. Verify ----------
+SHOW DBT PROJECTS IN SCHEMA RETAIL_DBT.PROD;
+SELECT *
+FROM TABLE(RETAIL_DBT.INFORMATION_SCHEMA.DBT_PROJECT_EXECUTION_HISTORY())
+WHERE object_name = 'RETAIL_PROJECT' AND schema_name = 'PROD'
+ORDER BY query_start_time DESC LIMIT 5;
+SHOW TABLES IN SCHEMA RETAIL_DBT.PROD;
+*
+���� d47276193862c97617e8812e813a7651
+�.
+Interview Prep/DBT SETUP.sql�--- Set up the defaults
+CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH;
+USE WAREHOUSE COMPUTE_WH;
+
+DROP DATABASE IF EXISTS AIRBNB CASCADE;
+
+CREATE DATABASE AIRBNB;
+
+CREATE SCHEMA IF NOT EXISTS AIRBNB.RAW;
+CREATE SCHEMA IF NOT EXISTS AIRBNB.DEV;
+
+USE DATABASE AIRBNB;
+USE SCHEMA RAW;
+
+-- Create our three tables and import the data from S3
+CREATE OR REPLACE TABLE raw_listings
+                    (id integer,
+                     listing_url string,
+                     name string,
+                     room_type string,
+                     minimum_nights integer,
+                     host_id integer,
+                     price string,
+                     created_at datetime,
+                     updated_at datetime);
+
+COPY INTO raw_listings (id,
+                        listing_url,
+                        name,
+                        room_type,
+                        minimum_nights,
+                        host_id,
+                        price,
+                        created_at,
+                        updated_at)
+                   from 's3://dbt-datasets/listings.csv'
+                    FILE_FORMAT = (type = 'CSV' skip_header = 1
+                    FIELD_OPTIONALLY_ENCLOSED_BY = '"');
+
+
+CREATE OR REPLACE TABLE raw_reviews
+                    (listing_id integer,
+                     date datetime,
+                     reviewer_name string,
+                     comments string,
+                     sentiment string);
+
+COPY INTO raw_reviews (listing_id, date, reviewer_name, comments, sentiment)
+                   from 's3://dbt-datasets/reviews.csv'
+                    FILE_FORMAT = (type = 'CSV' skip_header = 1
+                    FIELD_OPTIONALLY_ENCLOSED_BY = '"');
+
+
+CREATE OR REPLACE TABLE raw_hosts
+                    (id integer,
+                     name string,
+                     is_superhost string,
+                     created_at datetime,
+                     updated_at datetime);
+
+COPY INTO raw_hosts (id, name, is_superhost, created_at, updated_at)
+                   from 's3://dbt-datasets/hosts.csv'
+                    FILE_FORMAT = (type = 'CSV' skip_header = 1
+                    FIELD_OPTIONALLY_ENCLOSED_BY = '"');
+
+
+-- =====================================================================
+-- DATA FLOW EXPLORATION  (AIRBNB database)
+--
+--   RAW (loaded from S3)          DEV (built by dbt)
+--   RAW_LISTINGS --> src_listings --> DIM_LISTINGS_CLEANSED --+
+--                \-> SCD_RAW_LISTINGS (snapshot)              +--> DIM_LISTINGS_W_HOSTS
+--   RAW_HOSTS    --> src_hosts    --> DIM_HOSTS_CLEANSED -----+
+--                \-> SCD_RAW_HOSTS (snapshot)
+--   RAW_REVIEWS  --> src_reviews  --> FCT_REVIEWS (incremental) --+
+--   SEED_FULL_MOON_DATES (seed) ----------------------------------+--> MART_FULLMOON_REVIEWS
+--
+--   src_* models are ephemeral (not materialized), so they don't exist as objects.
+-- =====================================================================
+
+-- ---------- 1. RAW layer ----------
+SELECT * FROM AIRBNB.RAW.RAW_LISTINGS LIMIT 10;
+SELECT * FROM AIRBNB.RAW.RAW_HOSTS    LIMIT 10;
+SELECT * FROM AIRBNB.RAW.RAW_REVIEWS  LIMIT 10;
+
+-- ---------- 2. Cleansed dimensions ----------
+SELECT * FROM AIRBNB.DEV.DIM_LISTINGS_CLEANSED LIMIT 10;
+SELECT * FROM AIRBNB.DEV.DIM_HOSTS_CLEANSED    LIMIT 10;
+SELECT * FROM AIRBNB.DEV.DIM_LISTINGS_W_HOSTS  LIMIT 10;
+
+-- ---------- 3. Fact + seed + mart ----------
+SELECT * FROM AIRBNB.DEV.FCT_REVIEWS           LIMIT 10;
+SELECT * FROM AIRBNB.DEV.SEED_FULL_MOON_DATES  LIMIT 10;
+SELECT * FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS LIMIT 10;
+
+-- ---------- 4. Snapshots (SCD Type 2 history) ----------
+SELECT * FROM AIRBNB.DEV.SCD_RAW_LISTINGS ORDER BY id, dbt_valid_from LIMIT 10;
+SELECT * FROM AIRBNB.DEV.SCD_RAW_HOSTS    ORDER BY id, dbt_valid_from LIMIT 10;
+
+-- ---------- 5. Practice / test models ----------
+SELECT * FROM AIRBNB.DEV.MY_FIRST_DBT_MODEL;
+SELECT * FROM AIRBNB.DEV.MY_SECOND_DBT_MODEL;
+SELECT * FROM AIRBNB.DEV.DBT_FIRST_FILE  LIMIT 10;
+SELECT * FROM AIRBNB.DEV.DBT_SECOND_FILE LIMIT 10;
+
+-- ---------- 6. Follow the flow: row counts per layer ----------
+SELECT 'RAW_REVIEWS' AS model, COUNT(*) AS row_cnt FROM AIRBNB.RAW.RAW_REVIEWS
+UNION ALL SELECT 'FCT_REVIEWS',           COUNT(*) FROM AIRBNB.DEV.FCT_REVIEWS
+UNION ALL SELECT 'MART_FULLMOON_REVIEWS', COUNT(*) FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS
+UNION ALL SELECT 'RAW_LISTINGS',          COUNT(*) FROM AIRBNB.RAW.RAW_LISTINGS
+UNION ALL SELECT 'DIM_LISTINGS_W_HOSTS',  COUNT(*) FROM AIRBNB.DEV.DIM_LISTINGS_W_HOSTS
+UNION ALL SELECT 'RAW_HOSTS',             COUNT(*) FROM AIRBNB.RAW.RAW_HOSTS
+UNION ALL SELECT 'DIM_HOSTS_CLEANSED',    COUNT(*) FROM AIRBNB.DEV.DIM_HOSTS_CLEANSED;
+
+-- Reviews dropped between RAW and FCT (fct_reviews filters out NULL review text)
+SELECT COUNT(*) AS null_comment_reviews FROM AIRBNB.RAW.RAW_REVIEWS WHERE comments IS NULL;
+
+-- ---------- 7. Compare raw vs cleansed listings ----------
+SELECT r.id, r.name, r.price AS raw_price, d.listing_name, d.price AS clean_price, d.minimum_nights
+FROM AIRBNB.RAW.RAW_LISTINGS r
+JOIN AIRBNB.DEV.DIM_LISTINGS_CLEANSED d ON d.listing_id = r.id
+LIMIT 10;
+
+-- ---------- 8. Play with the data ----------
+-- Does a full moon affect review sentiment?
+SELECT is_full_moon, review_sentiment, COUNT(*) AS reviews
+FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- Superhosts vs regular hosts: listing count and average price
+SELECT host_is_superhost, COUNT(*) AS listings, ROUND(AVG(price), 2) AS avg_price
+FROM AIRBNB.DEV.DIM_LISTINGS_W_HOSTS
+GROUP BY 1;
+
+-- Reviews per year with sentiment split
+SELECT YEAR(review_date) AS yr,
+       COUNT_IF(review_sentiment = 'positive') AS positive,
+       COUNT_IF(review_sentiment = 'neutral')  AS neutral,
+       COUNT_IF(review_sentiment = 'negative') AS negative
+FROM AIRBNB.DEV.FCT_REVIEWS
+GROUP BY 1
+ORDER BY 1;*
+���� 38f5a8bddf625ee4ae2d1bb7f6a9d7fd
+�
+MCSTM Asset schema/CSTM Asset Schema Catg - View + Task (Asset Issue Type).sql��/* =============================================================================
+   UAT2_WPA_ASSET_DB.CORE  -  CSTM ASSET SCHEMA CATG  :  VIEW + TABLE + TASK version
+   *** SINGLE ISSUE TYPE variant  -  issue type from NPF_ASSET (asset master) ***
+
+   NOT DEPLOYED - kept ready in case testing raises concerns about the
+   multi-issue-type version (CSTM Asset Schema Catg - View + Task.sql).
+
+   Difference vs the multi-issue-type version
+     Multi (current) : ISS_TYPE from POSITION / TRANSACTION AST_ISS_TYPE -> one
+                       instrument can produce several rows (one per issue type).
+     This file       : ISS_TYPE from NPF_ASSET.ISS_TYPE -> exactly ONE issue type
+                       per instrument -> ONE row per schema x customer x instrument.
+                       POSITION / TRANSACTION only decide WHICH instruments a
+                       customer has; their issue-type column is not read.
+
+   Everything else unchanged: Oracle npf_asst_typ_mgr 11-arg + 6-arg +
+   RULE_EVALUATION, parity rules P1-P11, MERGE + DELETE load, 2 tasks.
+
+   Objects carry suffix _AI (Asset Issue type) so both versions can exist side by
+   side for comparison. To make this the live version, drop the suffix (and the
+   multi version's objects) - consumers read the table name only.
+
+     View  WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW        all logic in ONE view
+     Table WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL       physical result
+     Proc  WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP   MERGE + DELETE table FROM view
+     Task  WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK       every 3 minutes -> proc
+     Task  WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK  on rule table change -> proc
+     Streams: own pair (a stream offset is per consumer - can't share with the
+              multi version's tasks)
+
+   Load key : (SCHEMA_ID, CUST_SK, INSTR_ID)  - ISS_TYPE no longer part of the key
+              (it's a function of INSTR_ID). Column kept in the table for
+              consumers / comparison.
+
+   CTE map (view)                        former DT / Oracle unit
+     cust_scope   customers with a schema   (NPF_CUST_CSTM_SCHEMA)
+     cust_instr   DT4  caller loop          positions any date + transactions (instr only)
+     asset_std    DT1  6-arg proc + country NPF_ASSET.ISS_TYPE + NPF_ASSET_CATG + NPF_DECODE
+     combo        DT2  distinct desc combos
+     rule_eval    DT2  RULE_EVALUATION per rule
+     rule_pick    DT2  first (R1) / last (RN) match
+     cstm_row     DT3  v_rec_cnt + cstm_asset_cursor
+     calls / out  FINAL 11-arg proc (Path 1 custom / Path 2 rule-std)
+
+   Assumption to confirm: NPF_ASSET has ONE row per INSTR_ID (grain check in
+   section 4). If not, asset_std returns duplicates and the MERGE fails on purpose.
+   Tasks are serverless (no warehouse); role needs EXECUTE MANAGED TASK.
+   NOT compiled here - UAT2 databases not visible from this session.
+   ============================================================================= */
+
+
+/* -----------------------------------------------------------------------------
+   1. VIEW  -  all logic
+   ----------------------------------------------------------------------------- */
+CREATE OR REPLACE VIEW UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW
+  COMMENT = 'Oracle npf_asst_typ_mgr (11-arg) + RULE_EVALUATION per customer schema x customer instrument (issue type from NPF_ASSET). Loaded into WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL by WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK.'
+AS
+WITH
+-- customers that have a custom schema: limits the scan of the huge position/txn tables
+cust_scope AS (
+    SELECT DISTINCT cust_sk
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA
+    WHERE cust_sk IS NOT NULL
+),
+-- (DT4) instruments each in-scope customer ever held (any date) or transacted.
+-- Instrument only - issue type is taken from NPF_ASSET below.
+cust_instr AS (
+    SELECT p.cust_sk, p.instr_id
+    FROM UAT2_WPA_HOLDINGS_DB.CORE.WPA_AC_POSITION p
+    WHERE p.instr_id IS NOT NULL
+      AND p.cust_sk IN (SELECT cust_sk FROM cust_scope)
+    UNION                                                   -- de-duplicates
+    SELECT t.cust_sk, t.instr_id
+    FROM UAT2_WPA_TRANSACTION_DB.CORE.WPA_TRANSACTION t
+    WHERE t.instr_id IS NOT NULL
+      AND t.cust_sk IN (SELECT cust_sk FROM cust_scope)
+),
+-- distinct instruments to categorise
+instr AS (
+    SELECT DISTINCT instr_id FROM cust_instr
+),
+-- (DT1) standard category + country per instrument
+--       6-arg npf_asst_typ_mgr with the asset master's issue type
+asset_std AS (
+    SELECT
+        instr_id, iss_type,
+        std_sup_code, std_sub_code, std_sup_desc, std_sub_desc, cntry_desc,
+        NVL(std_sup_desc, '#NULL#') AS sup_desc_key,
+        NVL(std_sub_desc, '#NULL#') AS sub_desc_key,
+        NVL(cntry_desc,   '#NULL#') AS cntry_desc_key
+    FROM (
+        SELECT
+            a.instr_id,
+            NULLIF(a.iss_type, '') AS iss_type,
+            -- P1: FETCH overwrites all 4 defaults when a mapping row exists (even NULL values)
+            IFF(ac.iss_type IS NULL, '30',            NULLIF(ac.supcatg_code, '')) AS std_sup_code,
+            IFF(ac.iss_type IS NULL, '20',            NULLIF(ac.subcatg_code, '')) AS std_sub_code,
+            IFF(ac.iss_type IS NULL, 'Other Assets',  NULLIF(ac.supcatg_desc, '')) AS std_sup_desc,
+            IFF(ac.iss_type IS NULL, 'Miscellaneous', NULLIF(ac.subcatg_desc, '')) AS std_sub_desc,
+            NULLIF(d.dcde_desc, '')                                                  AS cntry_desc
+        FROM instr i
+        JOIN UAT2_WPA_ASSET_DB.CORE.NPF_ASSET a                  -- instr must exist in NPF_ASSET
+          ON a.instr_id = i.instr_id
+        LEFT JOIN UAT2_WPA_ASSET_DB.CORE.NPF_ASSET_CATG ac
+               ON ac.rptg_type = 'WLT'
+              AND ac.iss_type  = a.iss_type                      -- asset master issue type
+        LEFT JOIN UAT2_WPA_COMMON_UTIL_DB.CORE.NPF_DECODE d
+               ON d.dcde_type = 'CNTRY'
+              AND d.dcde_code = a.cntry_risk_dcde
+    )
+),
+-- (DT2) distinct desc combinations - rules depend only on these 3 values
+combo AS (
+    SELECT std_sup_desc, std_sub_desc, cntry_desc,
+           sup_desc_key, sub_desc_key, cntry_desc_key
+    FROM asset_std
+    GROUP BY ALL
+),
+-- (DT2) RULE_EVALUATION: per active rule x combo, condition / match counts
+rule_eval AS (
+    SELECT
+        r.schema_id,
+        cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+        r.rule_sk,
+        NULLIF(r.rule_cstm_supcatg_desc, '') AS rule_sup_desc,
+        NULLIF(r.rule_cstm_subcatg_desc, '') AS rule_sub_desc,
+        MAX(IFF(c.logical_oper = 'OR', 1, 0)) AS has_or,          -- P5
+        COUNT(c.rule_sk)                      AS cond_cnt,        -- P6: 0 when no conditions
+        COUNT_IF(
+             (c.rule_fld_name = 'CSTM_SUPCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sup_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sup_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_SUBCATG_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.std_sub_desc =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.std_sub_desc != NULLIF(c.rule_fld_value, ''))))
+          OR (c.rule_fld_name = 'CSTM_CNTRY_RISK_DESC' AND
+               ((c.rule_oper = 'EQUAL'    AND cb.cntry_desc   =  NULLIF(c.rule_fld_value, '')) OR
+                (c.rule_oper = 'NOTEQUAL' AND cb.cntry_desc   != NULLIF(c.rule_fld_value, ''))))
+        )                                     AS match_cnt        -- P4: NULL -> not counted
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR r
+    LEFT JOIN UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND c         -- LEFT: P6
+           ON c.rule_sk = r.rule_sk
+    CROSS JOIN combo cb                                           -- every rule tested on every combo
+    WHERE r.rule_stat = 'A'
+      AND r.schema_id IN (SELECT schema_id FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA)
+    GROUP BY r.schema_id, cb.sup_desc_key, cb.sub_desc_key, cb.cntry_desc_key,
+             r.rule_sk, r.rule_cstm_supcatg_desc, r.rule_cstm_subcatg_desc
+),
+-- (DT2) keep matching rules; first (_1) and last (_2, only when >1 match)  - P7
+rule_pick AS (
+    SELECT
+        schema_id, sup_desc_key, sub_desc_key, cntry_desc_key,
+        MIN_BY(rule_sup_desc, rule_sk)                          AS r1_sup,
+        MIN_BY(rule_sub_desc, rule_sk)                          AS r1_sub,
+        IFF(COUNT(*) > 1, MAX_BY(rule_sup_desc, rule_sk), NULL) AS rn_sup,
+        IFF(COUNT(*) > 1, MAX_BY(rule_sub_desc, rule_sk), NULL) AS rn_sub
+    FROM rule_eval
+    WHERE (has_or = 1 AND match_cnt > 0)
+       OR (has_or = 0 AND match_cnt = cond_cnt)
+    GROUP BY schema_id, sup_desc_key, sub_desc_key, cntry_desc_key
+),
+-- (DT3) active WLT custom row per schema + instrument  - P8, P9
+cstm_row AS (
+    SELECT
+        ncs.schema_id,
+        ncs.instr_id,
+        NULLIF(ncs.cstm_supcatg_code, '') AS cstm_supcatg_code,
+        NULLIF(ncs.cstm_supcatg_desc, '') AS cstm_supcatg_desc,
+        NULLIF(ncs.npf_supcatg_code,  '') AS npf_supcatg_code,
+        NULLIF(ncs.cstm_subcatg_code, '') AS cstm_subcatg_code,
+        NULLIF(ncs.cstm_subcatg_desc, '') AS cstm_subcatg_desc,
+        NULLIF(ncs.npf_subcatg_code,  '') AS npf_subcatg_code
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_SCHEMA ncs
+    WHERE ncs.rptg_type = 'WLT'
+      AND ncs.end_dt IS NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY ncs.schema_id, ncs.instr_id
+                               ORDER BY ncs.start_dt DESC) = 1
+),
+-- (FINAL) one row per npf_asst_typ_mgr call: customer schema x customer instrument
+calls AS (
+    SELECT
+        s.schema_id, s.cust_sk, s.schema_desc,
+        a.instr_id, a.iss_type,
+        a.std_sup_code, a.std_sub_code, a.std_sup_desc, a.std_sub_desc,
+        cr.schema_id AS cstm_hit,                                 -- NOT NULL => Path 1
+        cr.cstm_supcatg_code, cr.cstm_supcatg_desc, cr.npf_supcatg_code,
+        cr.cstm_subcatg_code, cr.cstm_subcatg_desc, cr.npf_subcatg_code,
+        rp.r1_sup, rp.r1_sub, rp.rn_sup, rp.rn_sub
+    FROM UAT2_WPA_ASSET_DB.CORE.NPF_CUST_CSTM_SCHEMA s
+    JOIN cust_instr ci ON ci.cust_sk  = s.cust_sk
+    JOIN asset_std  a  ON a.instr_id  = ci.instr_id               -- 1 row per instrument
+    LEFT JOIN cstm_row cr
+           ON cr.schema_id = s.schema_id
+          AND cr.instr_id  = a.instr_id
+    LEFT JOIN rule_pick rp
+           ON rp.schema_id      = s.schema_id
+          AND rp.sup_desc_key   = a.sup_desc_key
+          AND rp.sub_desc_key   = a.sub_desc_key
+          AND rp.cntry_desc_key = a.cntry_desc_key
+),
+out AS (
+    SELECT
+        schema_id, cust_sk, instr_id, iss_type, schema_desc,
+        std_sup_code AS supcatg_code,
+        std_sub_code AS subcatg_code,
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_supcatg_desc                   -- P8
+             ELSE COALESCE(rn_sup, r1_sup, std_sup_desc) END           AS supcatg_desc,   -- P7
+        CASE WHEN cstm_hit IS NOT NULL THEN cstm_subcatg_desc
+             ELSE COALESCE(rn_sub, r1_sub, std_sub_desc) END           AS subcatg_desc,
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_supcatg_code IS NULL, NVL(npf_supcatg_code, '') || '-S',
+                                                 cstm_supcatg_code        || '-C')
+             ELSE NVL(std_sup_code, '') || '-S' END                    AS cstm_supcatg_code,   -- P3
+        CASE WHEN cstm_hit IS NOT NULL THEN
+                  IFF(cstm_subcatg_code IS NULL, NVL(npf_subcatg_code, '') || '-S',
+                                                 cstm_subcatg_code        || '-C')
+             ELSE NVL(std_sup_code, '') || '-' || NVL(std_sub_code, '') || '-S' END AS cstm_subcatg_code
+    FROM calls
+)
+SELECT
+    schema_id,
+    cust_sk,
+    instr_id,
+    'WLT'        AS rptg_type,
+    iss_type,
+    supcatg_code,
+    subcatg_code,
+    supcatg_desc,
+    subcatg_desc,
+    cstm_supcatg_code,
+    cstm_subcatg_code,
+    supcatg_desc AS cstm_supcatg_desc,
+    subcatg_desc AS cstm_subcatg_desc,
+    schema_desc
+FROM out;
+
+
+/* -----------------------------------------------------------------------------
+   2. TARGET TABLE  (same columns as the multi version + load timestamp)
+   CREATE ... IF NOT EXISTS so re-running the script never drops loaded data.
+   ----------------------------------------------------------------------------- */
+CREATE TABLE IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL (
+    SCHEMA_ID          NUMBER,
+    CUST_SK            NUMBER,
+    INSTR_ID           VARCHAR,
+    RPTG_TYPE          VARCHAR,
+    ISS_TYPE           VARCHAR,
+    SUPCATG_CODE       VARCHAR,
+    SUBCATG_CODE       VARCHAR,
+    SUPCATG_DESC       VARCHAR,
+    SUBCATG_DESC       VARCHAR,
+    CSTM_SUPCATG_CODE  VARCHAR,
+    CSTM_SUBCATG_CODE  VARCHAR,
+    CSTM_SUPCATG_DESC  VARCHAR,
+    CSTM_SUBCATG_DESC  VARCHAR,
+    SCHEMA_DESC        VARCHAR,
+    LOAD_TS            TIMESTAMP_LTZ
+)
+COMMENT = 'Loaded by task WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK from view WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW (MERGE + DELETE on SCHEMA_ID, CUST_SK, INSTR_ID). Issue type from NPF_ASSET.';
+
+
+/* -----------------------------------------------------------------------------
+   3. LOAD  -  view -> table  (procedure + 2 streams + 2 serverless tasks)
+
+     WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK       SCHEDULE '3 MINUTES'            (regular)
+     WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK  triggered: WHEN rule stream(s)  (immediate)
+          │                                      has data - no schedule
+          └──────────────┬───────────────────────┘
+                         ▼
+          WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP()
+
+   Both runs consume the rule streams first, so a rule change already picked up
+   by a scheduled run does not trigger a second, redundant run.
+   ----------------------------------------------------------------------------- */
+
+-- 3a. Change tracking + streams on the rule tables (own streams for this version)
+-- ALTER TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR SET CHANGE_TRACKING = TRUE;   -- if not already on
+-- ALTER TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND SET CHANGE_TRACKING = TRUE;
+CREATE STREAM IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_AI_STRM
+  ON TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK on rule master changes';
+CREATE STREAM IF NOT EXISTS UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_AI_STRM
+  ON TABLE UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND
+  COMMENT = 'Triggers WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK on rule condition changes';
+
+-- 3b. Load procedure (MERGE load, delta only):
+--   0) consume rule streams FIRST (own transaction)
+--   a) view evaluated ONCE into a temp stage
+--   b) MERGE  : insert new keys, update only changed rows
+--   c) DELETE : keys the view no longer returns
+--   b + c in one transaction -> readers never see a half-applied load.
+-- Key = (SCHEMA_ID, CUST_SK, INSTR_ID). Duplicate keys -> MERGE fails (intended safeguard).
+CREATE OR REPLACE PROCEDURE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP()
+  RETURNS VARCHAR
+  LANGUAGE SQL
+  COMMENT = 'Delta load (MERGE + DELETE) of WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL from WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW'
+  EXECUTE AS CALLER                                         -- must come after COMMENT
+AS
+$$
+DECLARE
+    v_ins_upd NUMBER DEFAULT 0;
+    v_del     NUMBER DEFAULT 0;
+BEGIN
+    -- 0) consume rule streams (DDL first: auto-commits)
+    CREATE OR REPLACE TEMPORARY TABLE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_STRM_SINK (rule_sk NUMBER);
+    BEGIN TRANSACTION;
+    INSERT INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_AI_STRM WHERE 1 = 0;
+    INSERT INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_STRM_SINK (rule_sk)
+        SELECT rule_sk FROM UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_AI_STRM WHERE 1 = 0;
+    COMMIT;
+
+    -- a) stage
+    CREATE OR REPLACE TEMPORARY TABLE UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_STG AS
+    SELECT * FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW;
+
+    BEGIN TRANSACTION;
+
+    -- b) upsert  (ISS_TYPE is a normal attribute now: updated if the asset's issue type changes)
+    MERGE INTO UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL t
+    USING UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_STG s
+       ON  t.schema_id = s.schema_id
+       AND t.cust_sk   = s.cust_sk
+       AND t.instr_id  = s.instr_id
+    WHEN MATCHED AND (   t.rptg_type         IS DISTINCT FROM s.rptg_type
+                      OR t.iss_type          IS DISTINCT FROM s.iss_type
+                      OR t.supcatg_code      IS DISTINCT FROM s.supcatg_code
+                      OR t.subcatg_code      IS DISTINCT FROM s.subcatg_code
+                      OR t.supcatg_desc      IS DISTINCT FROM s.supcatg_desc
+                      OR t.subcatg_desc      IS DISTINCT FROM s.subcatg_desc
+                      OR t.cstm_supcatg_code IS DISTINCT FROM s.cstm_supcatg_code
+                      OR t.cstm_subcatg_code IS DISTINCT FROM s.cstm_subcatg_code
+                      OR t.cstm_supcatg_desc IS DISTINCT FROM s.cstm_supcatg_desc
+                      OR t.cstm_subcatg_desc IS DISTINCT FROM s.cstm_subcatg_desc
+                      OR t.schema_desc       IS DISTINCT FROM s.schema_desc)
+    THEN UPDATE SET
+         rptg_type         = s.rptg_type,
+         iss_type          = s.iss_type,
+         supcatg_code      = s.supcatg_code,
+         subcatg_code      = s.subcatg_code,
+         supcatg_desc      = s.supcatg_desc,
+         subcatg_desc      = s.subcatg_desc,
+         cstm_supcatg_code = s.cstm_supcatg_code,
+         cstm_subcatg_code = s.cstm_subcatg_code,
+         cstm_supcatg_desc = s.cstm_supcatg_desc,
+         cstm_subcatg_desc = s.cstm_subcatg_desc,
+         schema_desc       = s.schema_desc,
+         load_ts           = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (schema_id, cust_sk, instr_id, rptg_type, iss_type,
+         supcatg_code, subcatg_code, supcatg_desc, subcatg_desc,
+         cstm_supcatg_code, cstm_subcatg_code, cstm_supcatg_desc, cstm_subcatg_desc,
+         schema_desc, load_ts)
+    VALUES
+        (s.schema_id, s.cust_sk, s.instr_id, s.rptg_type, s.iss_type,
+         s.supcatg_code, s.subcatg_code, s.supcatg_desc, s.subcatg_desc,
+         s.cstm_supcatg_code, s.cstm_subcatg_code, s.cstm_supcatg_desc, s.cstm_subcatg_desc,
+         s.schema_desc, CURRENT_TIMESTAMP());
+    v_ins_upd := SQLROWCOUNT;
+
+    -- c) remove keys the view no longer produces
+    DELETE FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL t
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_STG s
+        WHERE s.schema_id = t.schema_id
+          AND s.cust_sk   = t.cust_sk
+          AND s.instr_id  = t.instr_id);
+    v_del := SQLROWCOUNT;
+
+    COMMIT;
+    RETURN 'merged (ins+upd): ' || v_ins_upd || ', deleted: ' || v_del;
+EXCEPTION
+    WHEN OTHER THEN
+        ROLLBACK;
+        RAISE;                                   -- task run shows FAILED with the error
+END;
+$$;
+
+-- 3c. Regular task: every 3 minutes, serverless
+CREATE OR REPLACE TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK
+  SCHEDULE = '3 MINUTES'
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'
+  USER_TASK_TIMEOUT_MS = 21600000                           -- 6 hours
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'Every 3 min: WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP (view -> table delta load)'
+AS
+  CALL UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP();
+
+-- 3d. Rule-change task: TRIGGERED (no SCHEDULE)
+CREATE OR REPLACE TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'SMALL'
+  TARGET_COMPLETION_INTERVAL = '10 MINUTES'
+  USER_TASK_TIMEOUT_MS = 21600000
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'On rule table change: WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP (immediate refresh)'
+  WHEN SYSTEM$STREAM_HAS_DATA('UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_AI_STRM')
+    OR SYSTEM$STREAM_HAS_DATA('UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_AI_STRM')
+AS
+  CALL UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP();
+
+-- Tasks are created suspended. For side-by-side testing, a one-off CALL is enough;
+-- resume only if this version goes live.
+-- ALTER TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK      RESUME;
+-- ALTER TASK UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK RESUME;
+
+
+/* -----------------------------------------------------------------------------
+   4. First load + checks
+   ----------------------------------------------------------------------------- */
+-- CALL UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP();
+
+-- Pre-check: NPF_ASSET must be 1 row per INSTR_ID (expect 0 rows)
+-- SELECT instr_id, COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.NPF_ASSET
+-- GROUP BY instr_id HAVING COUNT(*) > 1;
+
+-- Grain check on the view (expect 0 rows)
+-- SELECT schema_id, cust_sk, instr_id, COUNT(*)
+-- FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW
+-- GROUP BY ALL HAVING COUNT(*) > 1;
+
+-- Table vs view (same count right after a load)
+-- SELECT (SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL) AS tbl_rows,
+--        (SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW)  AS vw_rows;
+
+-- Compare with the multi-issue-type version
+-- (a) row counts: multi >= single; the difference = extra issue-type rows
+-- SELECT (SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL)    AS multi_rows,
+--        (SELECT COUNT(*) FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL) AS single_rows;
+
+-- (b) instruments where position/txn issue type differs from NPF_ASSET issue type
+--     -> these are exactly the rows where the two versions can give different categories
+-- SELECT m.schema_id, m.cust_sk, m.instr_id,
+--        m.iss_type      AS pos_txn_iss_type,
+--        s.iss_type      AS asset_iss_type,
+--        m.supcatg_desc  AS multi_sup,  s.supcatg_desc AS single_sup,
+--        m.subcatg_desc  AS multi_sub,  s.subcatg_desc AS single_sub
+-- FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL m
+-- JOIN UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL s
+--   ON s.schema_id = m.schema_id AND s.cust_sk = m.cust_sk AND s.instr_id = m.instr_id
+-- WHERE NOT EQUAL_NULL(m.iss_type, s.iss_type)
+-- ORDER BY m.instr_id;
+
+-- (c) keys present in one version only (expect 0 both ways - same instrument set)
+-- SELECT schema_id, cust_sk, instr_id FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_TBL
+-- EXCEPT
+-- SELECT schema_id, cust_sk, instr_id FROM UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL;
+
+-- Cleanup if this version is not needed
+-- DROP TASK   IF EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_RULE_TSK;
+-- DROP TASK   IF EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TSK;
+-- DROP PROCEDURE IF EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_LOAD_SP();
+-- DROP STREAM IF EXISTS UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_COND_CATG_AI_STRM;
+-- DROP STREAM IF EXISTS UAT2_WPA_ASSET_DB.CORE.NPF_CSTM_RULE_MSTR_CATG_AI_STRM;
+-- DROP TABLE  IF EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_TBL;
+-- DROP VIEW   IF EXISTS UAT2_WPA_ASSET_DB.CORE.WPA_CSTM_ASSET_SCHEMA_CATG_AI_VW;
+*
+���� 8b1e169d7955652dafc9737fb30fbe87
 ��
 :CSTM Asset schema/CSTM Asset Schema Catg - View + Task.sql��/* =============================================================================
    UAT2_WPA_ASSET_DB.CORE  -  CSTM ASSET SCHEMA CATG  :  VIEW + TABLE + TASK version
@@ -5311,136 +6876,6 @@ LIMIT 200;
 -- DROP TABLE IF EXISTS UAT2_WPA_ASSET_DB.CORE.VAL_CSTM_DIFF;
 *
 �˶� b728e06b2449e4267640e3531331a5ea
-�-
-PROD SETUP.sql�--- =====================================================================
--- PROD SETUP for retail_project  (GitHub Actions -> PROD account)
---
---   DEV  account : XCULCMB-SO42451  (this one)  -> CI builds on pull requests
---   PROD account : EIESWGF-ZX43054  (new trial) -> deploy on merge to main
---
--- Replace before running:
---   Repo: https://github.com/thazhaiselvan-git/dbt_deployment_demo
---   <GITHUB_USERNAME>    thazhaiselvan-git (or your GitHub login)
---   <GITHUB_PAT>         GitHub personal access token (Contents: Read)  -- never commit this
---   <DEV_PUBLIC_KEY>     contents of dev_key.pub  (without BEGIN/END lines)
---   <PROD_PUBLIC_KEY>    contents of prod_key.pub (without BEGIN/END lines)
--- =====================================================================
-
-
--- #####################################################################
--- PART A: run in the DEV account (XCULCMB-SO42451) as ACCOUNTADMIN
--- Service user that GitHub CI uses to build PR changes in RETAIL_DBT.CI_PR_<n>
--- #####################################################################
-USE ROLE ACCOUNTADMIN;
-
-CREATE USER IF NOT EXISTS SVC_GITHUB_CI
-  TYPE = SERVICE
-  DEFAULT_ROLE = DBT_ROLE
-  DEFAULT_WAREHOUSE = DBT_WH
-  RSA_PUBLIC_KEY = '<DEV_PUBLIC_KEY>'
-  COMMENT = 'GitHub Actions CI for retail_project';
-
-GRANT ROLE DBT_ROLE TO USER SVC_GITHUB_CI;
-
-
--- #####################################################################
--- PART B: run in the PROD account (EIESWGF-ZX43054) as ACCOUNTADMIN
--- #####################################################################
-USE ROLE ACCOUNTADMIN;
-
--- ---------- 1. Role and warehouse (same names as DEV so the profile needs no changes) ----------
-CREATE ROLE IF NOT EXISTS DBT_ROLE COMMENT = 'Runs retail_project in PROD';
-GRANT ROLE DBT_ROLE TO ROLE SYSADMIN;
-
-CREATE WAREHOUSE IF NOT EXISTS DBT_WH
-  WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE;
-GRANT USAGE, OPERATE ON WAREHOUSE DBT_WH TO ROLE DBT_ROLE;
-
--- ---------- 2. Database and schemas ----------
-CREATE DATABASE IF NOT EXISTS RETAIL_DBT;
-CREATE SCHEMA IF NOT EXISTS RETAIL_DBT.RAW;
-CREATE SCHEMA IF NOT EXISTS RETAIL_DBT.PROD;
-
-GRANT USAGE ON DATABASE RETAIL_DBT TO ROLE DBT_ROLE;
-GRANT USAGE ON SCHEMA RETAIL_DBT.RAW TO ROLE DBT_ROLE;
-GRANT SELECT ON FUTURE TABLES IN SCHEMA RETAIL_DBT.RAW TO ROLE DBT_ROLE;
-GRANT ALL ON SCHEMA RETAIL_DBT.PROD TO ROLE DBT_ROLE;
-
--- ---------- 3. RAW data (in real life this comes from your ingestion pipeline) ----------
-CREATE OR REPLACE TABLE RETAIL_DBT.RAW.NATIONS AS SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.NATION;
-CREATE OR REPLACE TABLE RETAIL_DBT.RAW.REGIONS AS SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.REGION;
-CREATE OR REPLACE TABLE RETAIL_DBT.RAW.CUSTOMERS AS
-  SELECT c.*, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS updated_at FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER c;
-CREATE OR REPLACE TABLE RETAIL_DBT.RAW.ORDERS AS
-  SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS WHERE o_orderkey <= 400000;
-CREATE OR REPLACE TABLE RETAIL_DBT.RAW.LINEITEMS AS
-  SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.LINEITEM WHERE l_orderkey <= 400000;
-GRANT SELECT ON ALL TABLES IN SCHEMA RETAIL_DBT.RAW TO ROLE DBT_ROLE;
-
--- ---------- 4. GitHub connection (integrations/secrets are per account, so recreate here) ----------
-CREATE OR REPLACE SECRET RETAIL_DBT.PROD.GITHUB_PAT
-  TYPE = PASSWORD
-  USERNAME = '<GITHUB_USERNAME>'
-  PASSWORD = '<GITHUB_PAT>';
-
-CREATE OR REPLACE API INTEGRATION GITHUB_API_INTEGRATION
-  API_PROVIDER = GIT_HTTPS_API
-  API_ALLOWED_PREFIXES = ('https://github.com/thazhaiselvan-git')
-  ALLOWED_AUTHENTICATION_SECRETS = (RETAIL_DBT.PROD.GITHUB_PAT)
-  ENABLED = TRUE;
-
-GRANT USAGE ON INTEGRATION GITHUB_API_INTEGRATION TO ROLE DBT_ROLE;
-GRANT READ, USAGE ON SECRET RETAIL_DBT.PROD.GITHUB_PAT TO ROLE DBT_ROLE;
-GRANT EXECUTE TASK ON ACCOUNT TO ROLE DBT_ROLE;
-
--- ---------- 5. Deploy service user for GitHub Actions ----------
-CREATE USER IF NOT EXISTS SVC_GITHUB_DEPLOY
-  TYPE = SERVICE
-  DEFAULT_ROLE = DBT_ROLE
-  DEFAULT_WAREHOUSE = DBT_WH
-  RSA_PUBLIC_KEY = '<PROD_PUBLIC_KEY>'
-  COMMENT = 'GitHub Actions deploy for retail_project';
-GRANT ROLE DBT_ROLE TO USER SVC_GITHUB_DEPLOY;
-
--- Let yourself use DBT_ROLE in the PROD account too
-GRANT ROLE DBT_ROLE TO USER <YOUR_PROD_LOGIN>;   -- your login name in the PROD account
-
--- ---------- 6. Objects owned by DBT_ROLE: Git repo, dbt project, schedule ----------
-USE ROLE DBT_ROLE;
-USE WAREHOUSE DBT_WH;
-
-CREATE OR REPLACE GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO
-  API_INTEGRATION = GITHUB_API_INTEGRATION
-  GIT_CREDENTIALS = RETAIL_DBT.PROD.GITHUB_PAT
-  ORIGIN = 'https://github.com/thazhaiselvan-git/dbt_deployment_demo.git';
-
-ALTER GIT REPOSITORY RETAIL_DBT.PROD.RETAIL_GIT_REPO FETCH;
-LS @RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project;   -- should list dbt_project.yml
-
--- First deploy (later deploys come from GitHub Actions via ALTER ... DEPLOY FROM)
-CREATE DBT PROJECT IF NOT EXISTS RETAIL_DBT.PROD.RETAIL_PROJECT
-  FROM '@RETAIL_DBT.PROD.RETAIL_GIT_REPO/branches/main/retail_project'
-  DEFAULT_TARGET = 'prod';
-
-EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
-
--- Daily scheduled run (resume when ready)
-CREATE OR ALTER TASK RETAIL_DBT.PROD.RUN_RETAIL_DBT_DAILY
-  WAREHOUSE = DBT_WH
-  SCHEDULE = 'USING CRON 0 6 * * * Asia/Tokyo'
-AS
-  EXECUTE DBT PROJECT RETAIL_DBT.PROD.RETAIL_PROJECT ARGS = 'build --target prod';
--- ALTER TASK RETAIL_DBT.PROD.RUN_RETAIL_DBT_DAILY RESUME;
-
--- ---------- 7. Verify ----------
-SHOW DBT PROJECTS IN SCHEMA RETAIL_DBT.PROD;
-SELECT *
-FROM TABLE(RETAIL_DBT.INFORMATION_SCHEMA.DBT_PROJECT_EXECUTION_HISTORY())
-WHERE object_name = 'RETAIL_PROJECT' AND schema_name = 'PROD'
-ORDER BY query_start_time DESC LIMIT 5;
-SHOW TABLES IN SCHEMA RETAIL_DBT.PROD;
-*
-◦� c2ea0fa1426b02a1e9dc4e1f1a0bc41d
 �
 dretail_project/target/compiled/retail_project/models/schema.yml/not_null_fct_orders_customer_key.sql^
     
@@ -6691,151 +8126,6 @@ join {{ source('retail', 'regions') }} r
 from {{ source('retail', 'orders') }}
 *
 ���� 0d7a9ad122eff2d2f6ef45f3f40306fa
-�.
-DBT SETUP.sql�--- Set up the defaults
-CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH;
-USE WAREHOUSE COMPUTE_WH;
-
-DROP DATABASE IF EXISTS AIRBNB CASCADE;
-
-CREATE DATABASE AIRBNB;
-
-CREATE SCHEMA IF NOT EXISTS AIRBNB.RAW;
-CREATE SCHEMA IF NOT EXISTS AIRBNB.DEV;
-
-USE DATABASE AIRBNB;
-USE SCHEMA RAW;
-
--- Create our three tables and import the data from S3
-CREATE OR REPLACE TABLE raw_listings
-                    (id integer,
-                     listing_url string,
-                     name string,
-                     room_type string,
-                     minimum_nights integer,
-                     host_id integer,
-                     price string,
-                     created_at datetime,
-                     updated_at datetime);
-
-COPY INTO raw_listings (id,
-                        listing_url,
-                        name,
-                        room_type,
-                        minimum_nights,
-                        host_id,
-                        price,
-                        created_at,
-                        updated_at)
-                   from 's3://dbt-datasets/listings.csv'
-                    FILE_FORMAT = (type = 'CSV' skip_header = 1
-                    FIELD_OPTIONALLY_ENCLOSED_BY = '"');
-
-
-CREATE OR REPLACE TABLE raw_reviews
-                    (listing_id integer,
-                     date datetime,
-                     reviewer_name string,
-                     comments string,
-                     sentiment string);
-
-COPY INTO raw_reviews (listing_id, date, reviewer_name, comments, sentiment)
-                   from 's3://dbt-datasets/reviews.csv'
-                    FILE_FORMAT = (type = 'CSV' skip_header = 1
-                    FIELD_OPTIONALLY_ENCLOSED_BY = '"');
-
-
-CREATE OR REPLACE TABLE raw_hosts
-                    (id integer,
-                     name string,
-                     is_superhost string,
-                     created_at datetime,
-                     updated_at datetime);
-
-COPY INTO raw_hosts (id, name, is_superhost, created_at, updated_at)
-                   from 's3://dbt-datasets/hosts.csv'
-                    FILE_FORMAT = (type = 'CSV' skip_header = 1
-                    FIELD_OPTIONALLY_ENCLOSED_BY = '"');
-
-
--- =====================================================================
--- DATA FLOW EXPLORATION  (AIRBNB database)
---
---   RAW (loaded from S3)          DEV (built by dbt)
---   RAW_LISTINGS --> src_listings --> DIM_LISTINGS_CLEANSED --+
---                \-> SCD_RAW_LISTINGS (snapshot)              +--> DIM_LISTINGS_W_HOSTS
---   RAW_HOSTS    --> src_hosts    --> DIM_HOSTS_CLEANSED -----+
---                \-> SCD_RAW_HOSTS (snapshot)
---   RAW_REVIEWS  --> src_reviews  --> FCT_REVIEWS (incremental) --+
---   SEED_FULL_MOON_DATES (seed) ----------------------------------+--> MART_FULLMOON_REVIEWS
---
---   src_* models are ephemeral (not materialized), so they don't exist as objects.
--- =====================================================================
-
--- ---------- 1. RAW layer ----------
-SELECT * FROM AIRBNB.RAW.RAW_LISTINGS LIMIT 10;
-SELECT * FROM AIRBNB.RAW.RAW_HOSTS    LIMIT 10;
-SELECT * FROM AIRBNB.RAW.RAW_REVIEWS  LIMIT 10;
-
--- ---------- 2. Cleansed dimensions ----------
-SELECT * FROM AIRBNB.DEV.DIM_LISTINGS_CLEANSED LIMIT 10;
-SELECT * FROM AIRBNB.DEV.DIM_HOSTS_CLEANSED    LIMIT 10;
-SELECT * FROM AIRBNB.DEV.DIM_LISTINGS_W_HOSTS  LIMIT 10;
-
--- ---------- 3. Fact + seed + mart ----------
-SELECT * FROM AIRBNB.DEV.FCT_REVIEWS           LIMIT 10;
-SELECT * FROM AIRBNB.DEV.SEED_FULL_MOON_DATES  LIMIT 10;
-SELECT * FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS LIMIT 10;
-
--- ---------- 4. Snapshots (SCD Type 2 history) ----------
-SELECT * FROM AIRBNB.DEV.SCD_RAW_LISTINGS ORDER BY id, dbt_valid_from LIMIT 10;
-SELECT * FROM AIRBNB.DEV.SCD_RAW_HOSTS    ORDER BY id, dbt_valid_from LIMIT 10;
-
--- ---------- 5. Practice / test models ----------
-SELECT * FROM AIRBNB.DEV.MY_FIRST_DBT_MODEL;
-SELECT * FROM AIRBNB.DEV.MY_SECOND_DBT_MODEL;
-SELECT * FROM AIRBNB.DEV.DBT_FIRST_FILE  LIMIT 10;
-SELECT * FROM AIRBNB.DEV.DBT_SECOND_FILE LIMIT 10;
-
--- ---------- 6. Follow the flow: row counts per layer ----------
-SELECT 'RAW_REVIEWS' AS model, COUNT(*) AS row_cnt FROM AIRBNB.RAW.RAW_REVIEWS
-UNION ALL SELECT 'FCT_REVIEWS',           COUNT(*) FROM AIRBNB.DEV.FCT_REVIEWS
-UNION ALL SELECT 'MART_FULLMOON_REVIEWS', COUNT(*) FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS
-UNION ALL SELECT 'RAW_LISTINGS',          COUNT(*) FROM AIRBNB.RAW.RAW_LISTINGS
-UNION ALL SELECT 'DIM_LISTINGS_W_HOSTS',  COUNT(*) FROM AIRBNB.DEV.DIM_LISTINGS_W_HOSTS
-UNION ALL SELECT 'RAW_HOSTS',             COUNT(*) FROM AIRBNB.RAW.RAW_HOSTS
-UNION ALL SELECT 'DIM_HOSTS_CLEANSED',    COUNT(*) FROM AIRBNB.DEV.DIM_HOSTS_CLEANSED;
-
--- Reviews dropped between RAW and FCT (fct_reviews filters out NULL review text)
-SELECT COUNT(*) AS null_comment_reviews FROM AIRBNB.RAW.RAW_REVIEWS WHERE comments IS NULL;
-
--- ---------- 7. Compare raw vs cleansed listings ----------
-SELECT r.id, r.name, r.price AS raw_price, d.listing_name, d.price AS clean_price, d.minimum_nights
-FROM AIRBNB.RAW.RAW_LISTINGS r
-JOIN AIRBNB.DEV.DIM_LISTINGS_CLEANSED d ON d.listing_id = r.id
-LIMIT 10;
-
--- ---------- 8. Play with the data ----------
--- Does a full moon affect review sentiment?
-SELECT is_full_moon, review_sentiment, COUNT(*) AS reviews
-FROM AIRBNB.DEV.MART_FULLMOON_REVIEWS
-GROUP BY 1, 2
-ORDER BY 1, 2;
-
--- Superhosts vs regular hosts: listing count and average price
-SELECT host_is_superhost, COUNT(*) AS listings, ROUND(AVG(price), 2) AS avg_price
-FROM AIRBNB.DEV.DIM_LISTINGS_W_HOSTS
-GROUP BY 1;
-
--- Reviews per year with sentiment split
-SELECT YEAR(review_date) AS yr,
-       COUNT_IF(review_sentiment = 'positive') AS positive,
-       COUNT_IF(review_sentiment = 'neutral')  AS neutral,
-       COUNT_IF(review_sentiment = 'negative') AS negative
-FROM AIRBNB.DEV.FCT_REVIEWS
-GROUP BY 1
-ORDER BY 1;*
-���� 15be962ceb3a0c9d6cb61c7cfebdc016
 ٰ
 ,CSTM Asset schema/Existing dynamic table.sql��create or replace dynamic table DEV_ANALYTICS_DB.WCA.WPA_ASSET_DYN(
 	ASD_ASSET_SID,
@@ -7910,9 +9200,6 @@ by Y V Ravi Kumar, Snowflake Data Superhero and Global CTO at CloudDBOps*
 9
 Queries.sql*
 ���� 12fe75904c3fa89ae1a44e140b438ee4
-Y
-+Interview Prep/Snowflake Interview prep.sql*
-���� 4fede761eefff48614c0f966f962d12b
 �>
 Interview Prep/SQL Prep.sql�>-- =====================================================
 -- SETUP: CREATE + INSERT (idempotent, Snowflake style)

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="snowflake-source" content="cortex-agent-authored" />
+<title>WPA_CSTM_ASSET_SCHEMA_CATG - How each row and value is derived</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-11-20",
+  "intent": "Visual explanation of the WPA_CSTM_ASSET_SCHEMA_CATG derivation logic (Oracle npf_asst_typ_mgr + RULE_EVALUATION as implemented in the Snowflake view + MERGE load).",
+  "dataSources": [
+    { "type": "file", "path": "CSTM Asset schema/CSTM Asset Schema Catg - View + Task (Asset Issue Type).sql" },
+    { "type": "file", "path": "CSTM Asset schema/Asset Type Manager - Oracle.sql" },
+    { "type": "file", "path": "CSTM Asset schema/Rule Evaluation Oracle.sql" }
+  ],
+  "sections": [
+    { "id": "step1", "title": "Step 1 - Which rows exist" },
+    { "id": "step2", "title": "Step 2 - Standard category" },
+    { "id": "step3", "title": "Step 3 - Custom override or rules" },
+    { "id": "step4", "title": "Step 4 - Output columns" },
+    { "id": "step5", "title": "Step 5 - Load" },
+    { "id": "examples", "title": "Examples" }
+  ]
+}
+</script>
+<style>
+  :root { color-scheme: light dark;
+    --fg: light-dark(#1f2937, #e5e7eb); --muted: light-dark(#64748b, #94a3b8);
+    --line: light-dark(#cbd5e1, #334155); --bg2: light-dark(#f8fafc, #0f172a);
+    --s1: light-dark(#2563eb, #60a5fa); --s1bg: light-dark(#eff6ff, #172554);
+    --s2: light-dark(#059669, #34d399); --s2bg: light-dark(#ecfdf5, #052e1f);
+    --s3: light-dark(#d97706, #fbbf24); --s3bg: light-dark(#fffbeb, #3a2a06);
+    --p1: light-dark(#7c3aed, #a78bfa); --p1bg: light-dark(#f5f3ff, #2e1065);
+    --p2: light-dark(#db2777, #f472b6); --p2bg: light-dark(#fdf2f8, #500724);
+    --s4: light-dark(#0891b2, #22d3ee); --s4bg: light-dark(#ecfeff, #083344);
+    --s5: light-dark(#475569, #cbd5e1); --s5bg: light-dark(#f1f5f9, #1e293b); }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, "Segoe UI", sans-serif; color: var(--fg); line-height: 1.45;
+    max-width: 1100px; width: 100%; margin: 0 auto; padding: clamp(14px, 3vw, 28px); }
+  h1 { font-size: clamp(1.4rem, 3.2vw, 1.9rem); margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em;
+    background: var(--bg2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  img, svg { max-width: 100%; height: auto; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 22px; }
+  .chip { font-size: .8rem; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 2px solid; }
+
+  /* step block */
+  .step { border: 2px solid var(--c); background: var(--cbg); border-radius: 14px; padding: 14px 16px 16px; position: relative; }
+  .step > .hdr { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .num { background: var(--c); color: light-dark(#fff, #0b1220); font-weight: 800; border-radius: 999px;
+    width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  .step h2 { margin: 0; font-size: 1.12rem; color: var(--c); }
+  .tag { font-size: .75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; background: var(--bg2); }
+  .c1 { --c: var(--s1); --cbg: var(--s1bg); } .c2 { --c: var(--s2); --cbg: var(--s2bg); }
+  .c3 { --c: var(--s3); --cbg: var(--s3bg); } .c4 { --c: var(--s4); --cbg: var(--s4bg); }
+  .c5 { --c: var(--s5); --cbg: var(--s5bg); }
+  .cp1 { --c: var(--p1); --cbg: var(--p1bg); } .cp2 { --c: var(--p2); --cbg: var(--p2bg); }
+
+  /* boxes inside steps */
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+  .box { flex: 1 1 220px; background: light-dark(#ffffffcc, #0b1220cc); border: 1.5px solid var(--c);
+    border-radius: 10px; padding: 10px 12px; }
+  .box h3 { margin: 0 0 4px; font-size: .95rem; color: var(--c); }
+  .box p, .box ul { margin: 4px 0 0; font-size: .9rem; }
+  .box ul { padding-left: 18px; }
+  .op { flex: none; align-self: center; font-weight: 800; font-size: 1.2rem; color: var(--c); padding: 0 2px; }
+  .note { font-size: .85rem; color: var(--muted); margin-top: 8px; }
+
+  /* arrows between steps */
+  .down { text-align: center; color: var(--muted); font-size: 1.6rem; line-height: 1; margin: 6px 0; }
+  .down small { display: block; font-size: .75rem; }
+
+  /* decision */
+  .decision { margin: 6px auto 12px; max-width: 640px; text-align: center; background: light-dark(#fff, #0b1220);
+    border: 2.5px dashed var(--s3); border-radius: 14px; padding: 10px 14px; font-weight: 700; }
+  .decision small { display: block; font-weight: 400; color: var(--muted); }
+  .paths { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .yesno { font-weight: 800; font-size: .8rem; letter-spacing: .04em; padding: 2px 8px; border-radius: 6px;
+    background: var(--c); color: light-dark(#fff, #0b1220); }
+
+  /* rule outcome lanes */
+  .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 8px; }
+  .lane { border: 1.5px solid var(--c); border-radius: 8px; padding: 8px; background: light-dark(#fff, #0b1220); font-size: .86rem; }
+  .lane b { color: var(--c); display: block; }
+  .codes { margin-top: 10px; border: 2px solid var(--c); border-radius: 8px; padding: 8px 10px; background: light-dark(#fff, #0b1220); font-size: .9rem; }
+
+  /* tables */
+  .table-wrap { overflow-x: auto; margin-top: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: .87rem; background: light-dark(#fff, #0b1220); }
+  th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--cbg); color: var(--c); }
+  .C { color: var(--p1); font-weight: 700; } .S { color: var(--s2); font-weight: 700; }
+  footer { margin-top: 28px; color: var(--muted); font-size: .8rem; border-top: 1px solid var(--line); padding-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>WPA_CSTM_ASSET_SCHEMA_CATG: how each row and value is derived</h1>
+<p class="sub">Oracle <code>npf_asst_typ_mgr</code> (6-arg + 11-arg) + <code>NPF_CUST_SCHEMA_RULE_EVALUATION_PKG.RULE_EVALUATION</code>, as implemented in the Snowflake view + MERGE load</p>
+
+<div class="legend">
+  <span class="chip" style="border-color:var(--s1);color:var(--s1)">1 · Rows</span>
+  <span class="chip" style="border-color:var(--s2);color:var(--s2)">2 · Standard category</span>
+  <span class="chip" style="border-color:var(--s3);color:var(--s3)">3 · Decision</span>
+  <span class="chip" style="border-color:var(--p1);color:var(--p1)">Path 1 · Custom row</span>
+  <span class="chip" style="border-color:var(--p2);color:var(--p2)">Path 2 · Rules</span>
+  <span class="chip" style="border-color:var(--s4);color:var(--s4)">4 · Output</span>
+  <span class="chip" style="border-color:var(--s5);color:var(--s5)">5 · Load</span>
+</div>
+
+<!-- ======================= STEP 1 ======================= -->
+<section class="step c1" id="step1">
+  <div class="hdr"><span class="num">1</span><h2>Which rows exist</h2>
+    <span class="tag">grain = SCHEMA_ID × CUST_SK × INSTR_ID × ISS_TYPE · RPTG_TYPE = 'WLT'</span></div>
+  <div class="row">
+    <div class="box"><h3>Customer schemas</h3><p>Every (<code>CUST_SK</code>, <code>SCHEMA_ID</code>) in <code>NPF_CUST_CSTM_SCHEMA</code></p></div>
+    <div class="op">×</div>
+    <div class="box"><h3>Customer's instruments + issue types</h3>
+      <ul><li><code>WPA_AC_POSITION</code>: <b>any</b> calendar date</li>
+          <li><code>WPA_TRANSACTION</code>: <b>any</b> date</li>
+          <li>(<code>CUST_SK</code>, <code>INSTR_ID</code>, <code>AST_ISS_TYPE</code>), UNION, distinct</li></ul></div>
+    <div class="op">⋈</div>
+    <div class="box"><h3>Must exist in NPF_ASSET</h3><p>Instrument not in <code>NPF_ASSET</code> → <b>no row</b> (same as the Oracle lookup)</p></div>
+  </div>
+  <p class="note">• An instrument with several issue types gives <b>one row per issue type</b>; they are never combined.
+     • A blank issue type (<code>''</code>) is treated as NULL: the row is kept and gets the default category in Step 2.</p>
+</section>
+<div class="down">▼</div>
+
+<!-- ======================= STEP 2 ======================= -->
+<section class="step c2" id="step2">
+  <div class="hdr"><span class="num">2</span><h2>Standard category</h2>
+    <span class="tag">Oracle 6-arg npf_asst_typ_mgr, called with the row's ISS_TYPE</span></div>
+  <div class="row">
+    <div class="box"><h3>Lookup NPF_ASSET_CATG</h3><p><code>RPTG_TYPE = 'WLT'</code> AND <code>ISS_TYPE</code> = row issue type</p></div>
+    <div class="op">→</div>
+    <div class="box"><h3>✔ Row found</h3><p>Standard super/sub <b>code + desc</b> = values from that row (even if a value is NULL)</p></div>
+    <div class="box"><h3>✘ Row not found</h3><p>Defaults: super <b>30 'Other Assets'</b>, sub <b>20 'Miscellaneous'</b></p></div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <div class="box"><h3>Country of risk</h3><p><code>NPF_ASSET.CNTRY_RISK_DCDE</code> → <code>NPF_DECODE</code> (<code>DCDE_TYPE='CNTRY'</code>) desc. Not found → NULL; the row is still processed.</p></div>
+  </div>
+</section>
+<div class="down">▼</div>
+
+<!-- ======================= STEP 3 ======================= -->
+<section class="step c3" id="step3">
+  <div class="hdr"><span class="num">3</span><h2>Custom override or rules</h2>
+    <span class="tag">Oracle 11-arg npf_asst_typ_mgr</span></div>
+
+  <div class="decision">Active custom row in NPF_CSTM_SCHEMA for (SCHEMA_ID, INSTR_ID)?
+    <small>RPTG_TYPE = 'WLT', END_DT IS NULL · if more than one is active → latest START_DT</small></div>
+
+  <div class="paths">
+    <!-- PATH 1 -->
+    <section class="step cp1">
+      <div class="hdr"><span class="yesno">YES</span><h2>Path 1: custom row wins</h2></div>
+      <p style="margin:0 0 6px;font-size:.9rem">Rules are <b>not</b> evaluated.<br>
+        <code>SUPCATG_DESC</code> / <code>SUBCATG_DESC</code> = custom row <code>CSTM_SUPCATG_DESC</code> / <code>CSTM_SUBCATG_DESC</code> (as-is, even NULL)</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Custom SUP / SUB code</th><th>CSTM_SUPCATG_CODE</th><th>CSTM_SUBCATG_CODE</th></tr></thead>
+        <tbody>
+          <tr><td>present / present</td><td class="C">&lt;cstm sup&gt;-C</td><td class="C">&lt;cstm sub&gt;-C</td></tr>
+          <tr><td>NULL / present</td><td class="S">&lt;npf sup&gt;-S</td><td class="C">&lt;cstm sub&gt;-C</td></tr>
+          <tr><td>present / NULL</td><td class="C">&lt;cstm sup&gt;-C</td><td class="S">&lt;npf sub&gt;-S</td></tr>
+          <tr><td>NULL / NULL</td><td class="S">&lt;npf sup&gt;-S</td><td class="S">&lt;npf sub&gt;-S</td></tr>
+        </tbody></table></div>
+      <p class="note">Each code is decided independently (Oracle 4-branch IF). &lt;npf …&gt; = <code>NPF_SUPCATG_CODE</code> / <code>NPF_SUBCATG_CODE</code> stored on the custom row.</p>
+    </section>
+
+    <!-- PATH 2 -->
+    <section class="step cp2">
+      <div class="hdr"><span class="yesno">NO</span><h2>Path 2: RULE_EVALUATION</h2></div>
+      <p style="margin:0 0 6px;font-size:.9rem">The schema's <b>active</b> rules (<code>RULE_STAT = 'A'</code>).<br>
+        Inputs: standard super desc, standard sub desc, country-of-risk desc (from Step 2)</p>
+      <div class="box" style="margin-bottom:8px"><h3>Each rule's conditions (NPF_CSTM_RULE_COND)</h3>
+        <ul>
+          <li>Field: <code>CSTM_SUPCATG_DESC</code> | <code>CSTM_SUBCATG_DESC</code> | <code>CSTM_CNTRY_RISK_DESC</code></li>
+          <li>Operator: <code>EQUAL</code> | <code>NOTEQUAL</code> against <code>RULE_FLD_VALUE</code></li>
+          <li>NULL input or value → condition is <b>false</b></li>
+          <li>Any condition with <code>LOGICAL_OPER='OR'</code> → <b>any</b> true; otherwise <b>all</b> true</li>
+          <li>Rule with <b>zero</b> conditions → <b>matches</b></li>
+        </ul></div>
+      <div class="lanes">
+        <div class="lane"><b>1 rule matches</b>desc = that rule's <code>RULE_CSTM_*_DESC</code></div>
+        <div class="lane"><b>&gt;1 rules match</b>desc = <b>last</b> match (highest <code>RULE_SK</code>); per column: last → first → standard</div>
+        <div class="lane"><b>No match</b>desc = standard descriptions</div>
+      </div>
+      <div class="codes"><b style="color:var(--p2)">Codes (always, whatever the rule result)</b><br>
+        <code>CSTM_SUPCATG_CODE</code> = <span class="S">&lt;std sup&gt;-S</span><br>
+        <code>CSTM_SUBCATG_CODE</code> = <span class="S">&lt;std sup&gt;-&lt;std sub&gt;-S</span>
+        <p class="note" style="margin:4px 0 0">Rule codes (e.g. 425) are <b>not</b> used; RULE_EVALUATION returns descriptions only.</p></div>
+    </section>
+  </div>
+</section>
+<div class="down">▼</div>
+
+<!-- ======================= STEP 4 ======================= -->
+<section class="step c4" id="step4">
+  <div class="hdr"><span class="num">4</span><h2>Output columns</h2></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Column</th><th>Path 1 (custom row)</th><th>Path 2 (rules / standard)</th></tr></thead>
+    <tbody>
+      <tr><td><code>SCHEMA_ID, CUST_SK, INSTR_ID, ISS_TYPE</code></td><td colspan="2">Key (Step 1)</td></tr>
+      <tr><td><code>RPTG_TYPE</code></td><td colspan="2"><code>'WLT'</code></td></tr>
+      <tr><td><code>SUPCATG_CODE / SUBCATG_CODE</code></td><td colspan="2"><b>Always</b> standard codes (Step 2)</td></tr>
+      <tr><td><code>SUPCATG_DESC / SUBCATG_DESC</code></td><td>Custom desc</td><td>Rule desc or standard desc</td></tr>
+      <tr><td><code>CSTM_SUPCATG_CODE / CSTM_SUBCATG_CODE</code></td><td>Matrix (<span class="C">-C</span> / <span class="S">-S</span>)</td><td><span class="S">&lt;sup&gt;-S</span>, <span class="S">&lt;sup&gt;-&lt;sub&gt;-S</span></td></tr>
+      <tr><td><code>CSTM_SUPCATG_DESC / CSTM_SUBCATG_DESC</code></td><td colspan="2">= <code>SUPCATG_DESC</code> / <code>SUBCATG_DESC</code></td></tr>
+      <tr><td><code>SCHEMA_DESC</code></td><td colspan="2"><code>NPF_CUST_CSTM_SCHEMA.SCHEMA_DESC</code></td></tr>
+      <tr><td><code>LOAD_TS</code></td><td colspan="2">When the row was last inserted or changed</td></tr>
+    </tbody></table></div>
+</section>
+<div class="down">▼</div>
+
+<!-- ======================= STEP 5 ======================= -->
+<section class="step c5" id="step5">
+  <div class="hdr"><span class="num">5</span><h2>Load</h2><span class="tag">every 3 min + immediately on a rule-table change</span></div>
+  <div class="row">
+    <div class="box"><h3>Recompute</h3><p>The view is recomputed from the base tables</p></div>
+    <div class="op">→</div>
+    <div class="box"><h3>MERGE on key</h3><p>Insert new rows · update <b>only changed</b> rows</p></div>
+    <div class="op">→</div>
+    <div class="box"><h3>DELETE</h3><p>Rows no longer produced (custom row ended, customer left the schema, …)</p></div>
+  </div>
+  <p class="note">MERGE + DELETE run in one transaction, so readers see the old or the new data, never a partial load.</p>
+</section>
+
+<!-- ======================= EXAMPLES ======================= -->
+<h2 id="examples" style="margin-top:28px">Examples (schema 10391)</h2>
+<div class="step c4" style="--c:var(--s4)">
+<div class="table-wrap"><table>
+  <thead><tr><th>Instrument</th><th>Path</th><th>Why</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>29148790000</td><td style="color:var(--p1);font-weight:700">1</td><td>Custom row: sup code 01, sub code empty</td><td><span class="C">01-C</span>, <span class="S">25-05-S</span>, Clone / Partnerships</td></tr>
+    <tr><td>74289530000</td><td style="color:var(--p1);font-weight:700">1</td><td>Custom row: sup code empty (NPF 80), sub code empty</td><td><span class="S">80-S</span>, <span class="S">25-05-S</span>, All Other / Partnerships</td></tr>
+    <tr><td>25292480001</td><td style="color:var(--p2);font-weight:700">2, no match</td><td>No custom row; rule 225 inactive</td><td><span class="S">90-S</span>, <span class="S">90-10-S</span>, standard descriptions</td></tr>
+    <tr><td>(rule 225 active and matched)</td><td style="color:var(--p2);font-weight:700">2, rule</td><td>No custom row</td><td>Desc = Clone / rule sub desc; codes still <span class="S">&lt;sup&gt;-S</span>, <span class="S">&lt;sup&gt;-&lt;sub&gt;-S</span></td></tr>
+  </tbody></table></div>
+</div>
+
+<footer>Oracle source references: <code>Asset Type Manager - Oracle.sql</code> (lines 221–301 custom path, 341–350 rule path) ·
+<code>Rule Evaluation Oracle.sql</code> (lines 8–10 outputs, 70–76 rule descriptions, 96–97 COALESCE). Oracle '' = NULL and CONCAT(NULL,'x') = 'x' are reproduced in Snowflake.</footer>
+</body>
+</html>
