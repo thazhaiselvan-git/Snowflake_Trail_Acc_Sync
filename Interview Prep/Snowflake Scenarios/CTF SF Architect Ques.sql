@@ -31,6 +31,7 @@
 ---30.Data Modelling and Types of Dimensions and Facts Theory
 ---31. Dynamic table Initial WH alone bigger and then next refresh on smaller WH.
 --32 . JSON file - File exceed issue in one col
+---33. Iceberg concepts with examples
 
 
 ----Interview Prep/Snowflake Scenarios
